@@ -1,0 +1,20 @@
+[package]
+name = "proof-of-inference-circuit"
+version = "0.1.0"
+description = "Arcis confidential inference circuit for Proof of Inference"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# When building with the Arcis toolchain, enable this feature to compile the
+# encrypted circuit module. Without it, we compile the plaintext reference code.
+arcis = []
+
+[dependencies]
+# arcis = { version = "0.1" }
+# The Arcium Arcis SDK is required to compile this circuit.
+# Install via: arcup (Arcium CLI installer)
+# This crate will not compile without the Arcis toolchain.
+sha2 = "0.10.9"

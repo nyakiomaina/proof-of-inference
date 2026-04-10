@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "programs/proof-of-inference",
+    "confidential",
+]
+resolver = "2"
+
+[workspace.dependencies]
+anchor-lang = "1.0.0"
+anchor-spl = "1.0.0"
+
+[profile.release]
+overflow-checks = true

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Rust / Anchor / Solana
+target/
+**/*.rs.bk
+.anchor/
+
+# Local validator ledgers (if started outside .anchor/)
+test-ledger/
+
+# TypeScript / tooling output
+dist/
+*.tsbuildinfo
+
+# Env and secrets (keep local only)
+.env
+.env.*
+!.env.example
+
+# Optional: local-only Arcium callback test keypair (uncomment if you never want it in git)
+# tests/fixtures/arcium_callback_authority.json
+
+# OS / editors
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.log

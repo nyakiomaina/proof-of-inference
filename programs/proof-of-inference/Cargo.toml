@@ -1,0 +1,25 @@
+[package]
+name = "proof-of-inference"
+version = "0.1.0"
+description = "On-chain verified AI inference attestation for Solana"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "proof_of_inference"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+# Compile-time `pubkey!(...)` — `solana_program::pubkey!` was removed in Solana SDK 3.x.
+solana-pubkey = "4.2"
+# SHA-256 for input/output commitments (replaces `solana_program::hash` on SDK 3.x).
+solana-sha256-hasher = { version = "3.1", features = ["sha2"] }

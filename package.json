@@ -1,0 +1,28 @@
+{
+  "name": "proof-of-inference",
+  "version": "0.1.0",
+  "description": "The Trust Layer for AI Agents on Solana — verified on-chain attestation of AI inference via Arcium MPC",
+  "private": true,
+  "scripts": {
+    "test": "anchor test --validator legacy",
+    "test:mocha": "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts",
+    "build:client": "tsc -p tsconfig.client.json",
+    "dev": "cd app && npm run dev",
+    "build:app": "cd app && npm run build"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.95.0",
+    "@solana/spl-token": "^0.4.6"
+  },
+  "devDependencies": {
+    "bn.js": "^5.2.1",
+    "@types/bn.js": "^5.1.5",
+    "@types/chai": "^4.3.16",
+    "@types/mocha": "^10.0.7",
+    "chai": "^4.4.1",
+    "mocha": "^10.7.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.5.0"
+  }
+}
