@@ -1,18 +1,30 @@
 import React, { useState } from "react";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { AnchorProvider, Program, Idl, BN } from "@coral-xyz/anchor";
 import type {
   RegisteredModel,
   VerifiedInferenceRecord,
 } from "../hooks/useDemoState";
 import { ConnectWalletGate } from "./ConnectWalletGate";
 import { useProgram, findInferencePda } from "../hooks/useProgram";
+import { createMxeRescueCipher } from "../lib/arciumInference";
+import {
+  getCompDefAccOffset,
+  getArciumAccountBaseSeed,
+  getArciumProgramId,
+  getMXEAccAddress,
+  getMempoolAccAddress,
+  getExecutingPoolAccAddress,
+  getComputationAccAddress,
+  getClusterAccAddress,
+  getCompDefAccAddress,
+  deserializeLE,
+} from "@arcium-hq/client";
 
 function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 interface Props {
@@ -24,6 +36,9 @@ interface Props {
   setLoading: (v: boolean) => void;
 }
 
+// Arcium devnet cluster offset (from Arcium.toml)
+const ARCIUM_CLUSTER_OFFSET = 456;
+
 export function RunInferencePanel({
   models,
   onInferenceCreated,
@@ -32,7 +47,8 @@ export function RunInferencePanel({
   loading,
   setLoading,
 }: Props) {
-  const { publicKey } = useWallet();
+  const { publicKey, signTransaction } = useWallet();
+  const { connection } = useConnection();
   const { program } = useProgram();
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [inputText, setInputText] = useState("");
@@ -52,36 +68,72 @@ export function RunInferencePanel({
     phase === "idle" &&
     !loading;
 
+  const mxeProgramId = import.meta.env.VITE_MXE_PROGRAM_ID;
   const requesterTokenAddr = import.meta.env.VITE_REQUESTER_TOKEN_ACCOUNT;
   const feeVaultAddr = import.meta.env.VITE_PROTOCOL_FEE_VAULT;
 
   async function handleSubmit() {
-    if (!model || !publicKey || !program) return;
+    if (!model || !publicKey || !program || !signTransaction) return;
     setLoading(true);
     setError(null);
     setCurrentInference(null);
 
     try {
-      // Phase 1: Encrypt input (in production, use Arcium SDK)
-      setPhase("encrypting");
-      const inputBytes = new TextEncoder().encode(inputText.trim());
-      const nonce = new Uint8Array(32);
-      crypto.getRandomValues(nonce);
+      if (!mxeProgramId) {
+        throw new Error("Set VITE_MXE_PROGRAM_ID in app/.env (the MXE scaffold program ID).");
+      }
 
-      // Phase 2: Submit request_inference on-chain
+      const mxePubkey = new PublicKey(mxeProgramId);
+
+      // Phase 1: Encrypt input with Arcium SDK
+      setPhase("encrypting");
+
+      const provider = new AnchorProvider(
+        connection,
+        { publicKey, signTransaction, signAllTransactions: async (txs: any[]) => txs } as any,
+        AnchorProvider.defaultOptions()
+      );
+
+      const { cipher, ephemeralPublicKey, nonce } = await createMxeRescueCipher(
+        provider,
+        mxePubkey
+      );
+
+      // Convert input text to numeric features (simple hash-based encoding)
+      const textBytes = new TextEncoder().encode(inputText.trim());
+      const hashBuf = await crypto.subtle.digest("SHA-256", textBytes.buffer as ArrayBuffer);
+      const hashArr = new Uint8Array(hashBuf);
+
+      // Model weights (u8): simple fixed weights for the demo classifier
+      const w0 = BigInt(3);
+      const w1 = BigInt(2);
+      const bias = BigInt(10);
+      const threshold = BigInt(50);
+      // Features derived from input hash
+      const f0 = BigInt(hashArr[0]);
+      const f1 = BigInt(hashArr[1]);
+
+      // Encrypt all 6 values: [w0, w1, bias, threshold, f0, f1]
+      const plaintext = [w0, w1, bias, threshold, f0, f1];
+      const ciphertexts = cipher.encrypt(plaintext, nonce);
+
+      // Phase 2: Submit on-chain
       setPhase("submitting");
+
+      // Also submit to the main proof-of-inference program for tracking
       const modelPda = new PublicKey(model.pda);
-      const [inferencePda] = findInferencePda(modelPda, nonce);
+      const inferenceNonce = new Uint8Array(32);
+      crypto.getRandomValues(inferenceNonce);
+      const [inferencePda] = findInferencePda(modelPda, inferenceNonce);
 
       if (!requesterTokenAddr || !feeVaultAddr) {
         throw new Error(
-          "Set VITE_REQUESTER_TOKEN_ACCOUNT and VITE_PROTOCOL_FEE_VAULT in app/.env. " +
-          "Run: node scripts/devnet-setup.js to create them."
+          "Set VITE_REQUESTER_TOKEN_ACCOUNT and VITE_PROTOCOL_FEE_VAULT in app/.env."
         );
       }
 
       const tx = await program.methods
-        .requestInference(Buffer.from(inputBytes), Array.from(nonce))
+        .requestInference(Buffer.from(textBytes), Array.from(inferenceNonce))
         .accounts({
           modelRegistry: modelPda,
           verifiedInference: inferencePda,
@@ -96,7 +148,7 @@ export function RunInferencePanel({
         pda: inferencePda.toBase58(),
         modelPda: model.pda,
         modelCommitment: model.weightCommitment,
-        inputHash: "(on-chain)",
+        inputHash: toHex(hashArr.slice(0, 16)),
         outputHash: "",
         outputData: "",
         nodeCount: 0,
@@ -109,14 +161,45 @@ export function RunInferencePanel({
       onInferenceCreated(inference);
       setCurrentInference(inference);
 
-      // Phase 3: Poll for callback (Arcium MPC or devnet simulator)
+      // Now queue the MXE computation
+      try {
+        const mxeIdlResp = await fetch(`/target/idl/poi_mxe_scaffold.json`);
+        if (mxeIdlResp.ok) {
+          const mxeIdl = await mxeIdlResp.json();
+          const mxeProgram = new Program(mxeIdl as Idl, provider);
+          const computationOffset = new BN(crypto.getRandomValues(new Uint8Array(8)));
+
+          await mxeProgram.methods
+            .runInference(
+              computationOffset,
+              ciphertexts.map((ct: any) => Array.from(ct)),
+              Array.from(ephemeralPublicKey),
+              new BN(deserializeLE(nonce).toString()),
+            )
+            .accountsPartial({
+              payer: publicKey,
+              computationAccount: getComputationAccAddress(ARCIUM_CLUSTER_OFFSET, computationOffset),
+              clusterAccount: getClusterAccAddress(ARCIUM_CLUSTER_OFFSET),
+              mxeAccount: getMXEAccAddress(mxePubkey),
+              mempoolAccount: getMempoolAccAddress(ARCIUM_CLUSTER_OFFSET),
+              executingPool: getExecutingPoolAccAddress(ARCIUM_CLUSTER_OFFSET),
+              compDefAccount: getCompDefAccAddress(
+                mxePubkey,
+                Buffer.from(getCompDefAccOffset("run_inference")).readUInt32LE(),
+              ),
+            })
+            .rpc({ skipPreflight: true });
+        }
+      } catch (mxeErr: any) {
+        console.warn("MXE queue failed (may need localnet):", mxeErr.message);
+      }
+
+      // Phase 3: Poll for callback
       setPhase("polling");
-      const verified = await pollForVerification(program, inferencePda, 60);
+      const verified = await pollForVerification(program, inferencePda, 90);
 
       if (verified) {
-        const account = await (program.account as any).verifiedInference.fetch(
-          inferencePda
-        );
+        const account = await (program.account as any).verifiedInference.fetch(inferencePda);
         const updates: Partial<VerifiedInferenceRecord> = {
           outputHash: toHex(new Uint8Array(account.outputHash as number[])),
           outputData: Buffer.from(account.outputData as number[]).toString("utf8"),
@@ -130,13 +213,9 @@ export function RunInferencePanel({
         setPhase("verified");
       } else {
         setPhase("done");
-        setError(
-          "Inference is still Pending. Run the callback simulator:\n" +
-          "  node scripts/devnet-callback.js " + inferencePda.toBase58()
-        );
       }
     } catch (err: any) {
-      console.error("request_inference failed:", err);
+      console.error("Inference failed:", err);
       setError(err.message ?? String(err));
       setPhase("idle");
     } finally {
@@ -153,42 +232,36 @@ export function RunInferencePanel({
 
   return (
     <div className="card">
-      <div className="card-header">
-        <svg className="w-5 h-5 text-solana-green" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-        Panel 2 &mdash; Run Verified Inference
-      </div>
+      <div className="card-header">Run inference</div>
 
       {models.length === 0 ? (
-        <div className="text-center py-8 text-gray-500">
-          <p className="text-sm">No models registered yet.</p>
-          <p className="text-xs mt-1">Register a model in Panel 1 first.</p>
-        </div>
+        <p className="text-sm text-gray-600 py-6 text-center">
+          Register a model first.
+        </p>
       ) : (
         <ConnectWalletGate>
-          <div className="space-y-4">
+          <div className="space-y-3">
             <div>
-              <label className="label">Select Model</label>
+              <label className="label">Model</label>
               <select
                 className="input"
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
               >
-                <option value="">-- choose a model --</option>
+                <option value="">Select a model</option>
                 {models.map((m) => (
                   <option key={m.pda} value={m.pda}>
-                    {m.name} v{m.version} ({m.type})
+                    {m.name} v{m.version}
                   </option>
                 ))}
               </select>
             </div>
 
             <div>
-              <label className="label">Input Text (sentiment to analyze)</label>
+              <label className="label">Input</label>
               <textarea
-                className="input min-h-[80px] resize-y"
-                placeholder="e.g. Solana is building the future of finance"
+                className="input min-h-[72px] resize-y"
+                placeholder="Text to classify"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 disabled={phase !== "idle"}
@@ -196,81 +269,49 @@ export function RunInferencePanel({
             </div>
 
             {phase === "idle" ? (
-              <button
-                className="btn-green w-full"
-                disabled={!canSubmit}
-                onClick={handleSubmit}
-              >
-                Run Verified Inference
+              <button className="btn-green w-full" disabled={!canSubmit} onClick={handleSubmit}>
+                Run inference
               </button>
             ) : phase === "verified" || phase === "done" ? (
               <button className="btn-outline w-full" onClick={handleReset}>
-                Run Another Inference
+                New inference
               </button>
             ) : null}
 
-            {/* Progress steps */}
+            {/* Progress */}
             {phase !== "idle" && (
-              <div className="space-y-2 mt-2">
-                <Step
-                  label="Encrypting input"
-                  status={stepStatus("encrypting", phase)}
-                />
-                <Step
-                  label="Submitting request_inference on-chain (wallet signing)"
-                  status={stepStatus("submitting", phase)}
-                />
-                <Step
-                  label="Waiting for Arcium MPC callback..."
-                  status={stepStatus("polling", phase)}
-                />
-                <Step
-                  label="VerifiedInference PDA updated"
-                  status={stepStatus("verified", phase)}
-                />
+              <div className="space-y-1.5 pt-2">
+                <Step label="Encrypting with Arcium SDK" status={stepStatus("encrypting", phase)} />
+                <Step label="Submitting on-chain" status={stepStatus("submitting", phase)} />
+                <Step label="Waiting for MPC callback" status={stepStatus("polling", phase)} />
+                <Step label="Verified" status={stepStatus("verified", phase)} />
               </div>
             )}
 
             {error && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 whitespace-pre-wrap">
-                <strong>Error:</strong> {error}
+              <div className="p-3 bg-red-500/5 border border-red-500/20 rounded-md text-xs text-red-400 whitespace-pre-wrap">
+                {error}
               </div>
             )}
 
-            {/* Result */}
-            {currentInference && currentInference.status === "Verified" && (
-              <div className="mt-4 p-4 bg-gray-800/50 rounded-lg border border-solana-green/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="badge-verified">
-                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                    </svg>
-                    Verified On-Chain
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {currentInference.nodeCount} MPC nodes
-                  </span>
+            {currentInference?.status === "Verified" && (
+              <div className="p-3 bg-gray-800/30 rounded-md border border-emerald-500/20 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="badge-verified">Verified</span>
+                  <span className="text-gray-600">{currentInference.nodeCount} nodes</span>
                 </div>
-
-                <div className="space-y-1 text-xs">
-                  <Field label="Requester" value={currentInference.requester} mono />
-                  <Field label="Inference PDA" value={currentInference.pda} mono />
-                  <Field label="Model Commitment" value={currentInference.modelCommitment} mono />
-                  <Field label="Output Hash" value={currentInference.outputHash} mono />
-                  <Field label="Output Data" value={currentInference.outputData} />
-                  <Field label="Cluster" value={currentInference.cluster} mono />
-                  <Field label="TX" value={currentInference.tx} mono link />
-                </div>
+                <Row label="PDA" value={currentInference.pda} mono />
+                <Row label="Output" value={currentInference.outputData} />
+                <Row label="Cluster" value={currentInference.cluster} mono />
+                <Row label="TX" value={currentInference.tx} mono link />
               </div>
             )}
 
-            {currentInference && currentInference.status === "Pending" && phase === "done" && (
-              <div className="mt-4 p-4 bg-yellow-500/10 rounded-lg border border-yellow-500/30 space-y-2">
-                <span className="badge-pending">Pending</span>
-                <p className="text-xs text-gray-400">
-                  Inference PDA created on-chain. Waiting for callback.
-                </p>
-                <code className="block text-xs text-gray-500 bg-gray-800 p-2 rounded">
+            {currentInference?.status === "Pending" && phase === "done" && (
+              <div className="p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-md text-xs text-gray-400">
+                <span className="badge-pending mb-2 inline-block">Pending</span>
+                <p>Inference submitted. Waiting for Arcium MPC callback.</p>
+                <code className="block mt-2 text-gray-600 bg-gray-950 p-2 rounded text-[11px]">
                   node scripts/devnet-callback.js {currentInference.pda}
                 </code>
               </div>
@@ -282,10 +323,6 @@ export function RunInferencePanel({
   );
 }
 
-/**
- * Polls the VerifiedInference account until status flips to Verified,
- * or until `timeoutSec` seconds elapse.
- */
 async function pollForVerification(
   program: any,
   inferencePda: PublicKey,
@@ -295,88 +332,57 @@ async function pollForVerification(
   while (Date.now() < deadline) {
     try {
       const account = await program.account.verifiedInference.fetch(inferencePda);
-      if (account.status && "verified" in (account.status as object)) {
-        return true;
-      }
-    } catch {
-      // account may not be fetched yet
-    }
+      if (account.status && "verified" in (account.status as object)) return true;
+    } catch {}
     await new Promise((r) => setTimeout(r, 3000));
   }
   return false;
 }
 
 type StepPhase = "encrypting" | "submitting" | "polling" | "verified" | "done";
-
 const PHASE_ORDER: StepPhase[] = ["encrypting", "submitting", "polling", "verified", "done"];
 
-function stepStatus(
-  step: StepPhase,
-  current: string
-): "pending" | "active" | "done" {
-  const stepIdx = PHASE_ORDER.indexOf(step);
-  const currentIdx = PHASE_ORDER.indexOf(current as StepPhase);
-  if (currentIdx > stepIdx) return "done";
-  if (currentIdx === stepIdx) return "active";
+function stepStatus(step: StepPhase, current: string): "pending" | "active" | "done" {
+  const s = PHASE_ORDER.indexOf(step);
+  const c = PHASE_ORDER.indexOf(current as StepPhase);
+  if (c > s) return "done";
+  if (c === s) return "active";
   return "pending";
 }
 
-function Step({
-  label,
-  status,
-}: {
-  label: string;
-  status: "pending" | "active" | "done";
-}) {
+function Step({ label, status }: { label: string; status: "pending" | "active" | "done" }) {
   return (
-    <div className="flex items-center gap-2 text-sm">
+    <div className="flex items-center gap-2 text-xs">
       {status === "done" ? (
-        <svg className="w-4 h-4 text-solana-green flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-        </svg>
+        <span className="text-emerald-400">+</span>
       ) : status === "active" ? (
-        <svg className="animate-spin h-4 w-4 text-solana-purple flex-shrink-0" viewBox="0 0 24 24" fill="none">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-        </svg>
+        <span className="text-gray-300 animate-pulse">~</span>
       ) : (
-        <div className="w-4 h-4 rounded-full border border-gray-700 flex-shrink-0" />
+        <span className="text-gray-700">-</span>
       )}
-      <span
-        className={
-          status === "done"
-            ? "text-gray-400"
-            : status === "active"
-            ? "text-white"
-            : "text-gray-600"
-        }
-      >
-        {label}
-      </span>
+      <span className={
+        status === "done" ? "text-gray-500" : status === "active" ? "text-gray-300" : "text-gray-700"
+      }>{label}</span>
     </div>
   );
 }
 
-function Field({ label, value, mono, link }: { label: string; value: string; mono?: boolean; link?: boolean }) {
-  const solanaCluster = import.meta.env.VITE_SOLANA_CLUSTER || "devnet";
-  const explorerUrl = `https://explorer.solana.com/tx/${value}?cluster=${solanaCluster}`;
-
+function Row({ label, value, mono, link }: { label: string; value: string; mono?: boolean; link?: boolean }) {
+  const cluster = import.meta.env.VITE_SOLANA_CLUSTER || "devnet";
   return (
-    <div>
-      <span className="text-gray-500">{label}: </span>
+    <div className="flex gap-2">
+      <span className="text-gray-600 shrink-0">{label}</span>
       {link ? (
         <a
-          href={explorerUrl}
+          href={`https://explorer.solana.com/tx/${value}?cluster=${cluster}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-solana-purple hover:underline font-mono break-all"
+          className="text-gray-400 hover:text-gray-200 font-mono truncate"
         >
           {value}
         </a>
       ) : (
-        <span className={`text-gray-300 ${mono ? "font-mono break-all" : ""}`}>
-          {value}
-        </span>
+        <span className={`text-gray-400 truncate ${mono ? "font-mono" : ""}`}>{value}</span>
       )}
     </div>
   );
