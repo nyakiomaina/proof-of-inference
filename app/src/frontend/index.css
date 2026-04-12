@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: "Inter", system-ui, sans-serif;
+  }
+  code, .font-mono {
+    font-family: "JetBrains Mono", monospace;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-xl p-6;
+  }
+  .card-header {
+    @apply text-lg font-semibold mb-4 flex items-center gap-2;
+  }
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer;
+  }
+  .btn-primary {
+    @apply btn bg-solana-purple hover:bg-solana-purple/80 text-white;
+  }
+  .btn-green {
+    @apply btn bg-solana-green/90 hover:bg-solana-green text-gray-950 font-semibold;
+  }
+  .btn-outline {
+    @apply btn border border-gray-700 hover:border-gray-500 text-gray-300;
+  }
+  .input {
+    @apply w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-solana-purple/50 focus:border-solana-purple/50;
+  }
+  .label {
+    @apply block text-xs font-medium text-gray-400 mb-1.5 uppercase tracking-wider;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-verified {
+    @apply badge bg-emerald-500/15 text-emerald-400 border border-emerald-500/30;
+  }
+  .badge-pending {
+    @apply badge bg-yellow-500/15 text-yellow-400 border border-yellow-500/30;
+  }
+  .badge-failed {
+    @apply badge bg-red-500/15 text-red-400 border border-red-500/30;
+  }
+  .badge-unverified {
+    @apply badge bg-red-500/15 text-red-400 border border-red-500/30;
+  }
+}
+
+/* Solana wallet adapter overrides */
+.wallet-adapter-button {
+  background-color: #9945FF !important;
+  border-radius: 0.5rem !important;
+  height: 2.5rem !important;
+  font-size: 0.875rem !important;
+}
+.wallet-adapter-button:hover {
+  background-color: #7c37cc !important;
+}
+.wallet-adapter-modal-wrapper {
+  background-color: #111827 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 1rem !important;
+}

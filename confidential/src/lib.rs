@@ -14,49 +14,39 @@
 // a 128-dimensional feature vector. Deliberately simple — the point is proving
 // the verification primitive, not building a SOTA model.
 
-// NOTE: This file requires the Arcis toolchain to compile.
-// The `#[encrypted]` attribute and `arcis_imports` are provided by the Arcis SDK.
-// Install via: `arcup` (Arcium CLI)
+// With `--features arcis`, uses `arcis` 0.9.7 (same as `arcium init` encrypted-ixs).
 //
-// When the Arcis SDK is not installed, this file serves as the authoritative
-// reference for the circuit logic that will execute inside the MXE.
+// `model_hash` is currently a placeholder: Arcis does not allow `f64::to_le_bytes` in
+// circuits, so we cannot SHA3-pack floats here without Arcium’s recommended pattern
+// (ask in Discord / see Arcis hashing docs). The plaintext `reference` module still
+// uses SHA-256 for local tests — align on-chain `weight_commitment` when you add a
+// real circuit commitment.
+
+#[cfg(feature = "arcis")]
+use arcis::*;
 
 #[cfg(feature = "arcis")]
 #[encrypted]
 mod inference_circuit {
-    use arcis_imports::*;
+    use arcis::*;
 
     // -----------------------------------------------------------------------
     // Types
     // -----------------------------------------------------------------------
 
-    /// The model's learnable parameters, encrypted at rest in the MXE.
-    /// Loaded by the model owner during registration.
-    #[derive(ArcisType)]
     pub struct ModelWeights {
-        /// Weight vector for the logistic regression. One weight per feature.
         pub weights: [f64; 128],
-        /// Bias term added to the dot product.
         pub bias: f64,
-        /// Classification threshold for the sigmoid output.
         pub threshold: f64,
     }
 
-    /// The user's input feature vector, encrypted with a shared secret.
-    #[derive(ArcisType)]
     pub struct InferenceInput {
-        /// Numeric features extracted from the user's query.
         pub features: [f64; 128],
     }
 
-    /// The result of running inference, sealed to the requester.
-    #[derive(ArcisType)]
     pub struct InferenceOutput {
-        /// 0 = negative, 1 = neutral, 2 = positive
         pub classification: u8,
-        /// Sigmoid confidence score in [0, 1].
         pub confidence: f64,
-        /// SHA-256 hash of the model weights used, proving which model ran.
         pub model_hash: [u8; 32],
     }
 
@@ -75,17 +65,14 @@ mod inference_circuit {
     pub fn run_verified_inference(
         model_ctxt: Enc<Mxe, ModelWeights>,
         input_ctxt: Enc<Shared, InferenceInput>,
-        requester: Shared,
     ) -> Enc<Shared, InferenceOutput> {
         let model = model_ctxt.to_arcis();
         let input = input_ctxt.to_arcis();
 
         // --- Step 1: Dot product ---
         let mut score = model.bias;
-        let mut i = 0;
-        while i < 128 {
+        for i in 0..128 {
             score = score + (input.features[i] * model.weights[i]);
-            i = i + 1;
         }
 
         // --- Step 2: Sigmoid approximation ---
@@ -120,12 +107,8 @@ mod inference_circuit {
             1u8
         };
 
-        // --- Step 4: Model commitment ---
-        // Hash the actual weights used inside the MPC computation.
-        // This proves which specific model produced the result.
-        // If the model owner swaps weights, the hash changes and won't
-        // match the registered ModelRegistry PDA on-chain.
-        let model_hash = compute_commitment(&model);
+        // --- Step 4: Model commitment (placeholder — see module comment) ---
+        let model_hash = [0u8; 32];
 
         // --- Step 5: Seal output to requester ---
         let output = InferenceOutput {
@@ -134,7 +117,7 @@ mod inference_circuit {
             model_hash,
         };
 
-        requester.from_arcis(output)
+        input_ctxt.owner.from_arcis(output)
     }
 }
 

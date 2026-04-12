@@ -13,8 +13,9 @@ crate-type = ["cdylib", "lib"]
 arcis = []
 
 [dependencies]
-# arcis = { version = "0.1" }
-# The Arcium Arcis SDK is required to compile this circuit.
-# Install via: arcup (Arcium CLI installer)
-# This crate will not compile without the Arcis toolchain.
+# Match `arcis` from `arcium init` encrypted-ixs (CLI 0.9.7).
+arcis = "0.9.7"
+# `blake3` is a direct dep of `encrypted-ixs` in the template; keeps arcis toolchain happy.
+blake3 = "=1.8.2"
+# Plaintext reference tests (no Arcis).
 sha2 = "0.10.9"

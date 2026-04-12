@@ -27,7 +27,9 @@ npm test
 |------|------|
 | `programs/proof-of-inference/` | Solana program: `register_model`, `request_inference`, `callback_verified_inference`, `check_verification`, plus `update_model`, `fail_inference` |
 | `confidential/` | Arcis confidential circuit (`feature = "arcis"`) and a **plaintext reference** implementation + unit tests when Arcis is not enabled |
-| `app/` | Frontend / demo (if present) |
+| `mxe/poi_mxe/` | **Arcium MXE** scaffold (`arcium init`): `arcium build` / `deploy` / `test` — separate from Anchor 1.0 until the inference circuit is ported into `encrypted-ixs/` |
+| `app/` | Frontend + **`@arcium-hq/client`** helper (`createMxeRescueCipher` in `app/src/frontend/lib/arciumInference.ts`) |
+| `scripts/watch-inference-requested.cjs` | Optional **log subscriber** for `Inference*` events (`npm run listen:inference`) |
 | `Anchor.toml` | Program IDs per cluster; provider wallet |
 | `tests/proof-of-inference.ts` | Local e2e: register → request → mock Arcium callback → verified |
 | `tests/fixtures/arcium_callback_authority.json` | Keypair used only for local tests (see above) |
@@ -36,7 +38,27 @@ npm test
 
 - **Rust** (stable)
 - **Solana CLI** and **Anchor CLI 1.0.x** (this workspace uses **anchor-lang / anchor-spl 1.0.0**)
-- Optional: **Arcium** toolchain (`arcup`) to compile the `#[encrypted]` circuit for real MPC
+- Optional: **Arcium** toolchain (`arcup` / `arcium`) for the MXE under `mxe/poi_mxe/`
+
+## Arcium MXE (deploy path)
+
+From the repo root (after `arcup install`):
+
+```bash
+npm run mxe:build          # or: cd mxe/poi_mxe && arcium build
+```
+
+Devnet deploy (use a **reliable RPC**; see [Arcium deployment](https://docs.arcium.com/developers/deployment)):
+
+```bash
+cd mxe/poi_mxe
+yarn install   # first time only
+arcium deploy --cluster-offset 456 --recovery-set-size 4 \
+  --keypair-path ~/.config/solana/id.json \
+  --rpc-url <your-devnet-rpc-url>
+```
+
+Set **`VITE_MXE_PROGRAM_ID`** in `app/.env` to the deployed MXE program id for frontend encryption helpers.
 
 ## Build and test
 

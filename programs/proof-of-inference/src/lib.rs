@@ -494,9 +494,12 @@ pub enum ErrorCode {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// The Arcium callback authority pubkey. In production, set this to Arcium’s
-/// network callback key. For **local testing only**, this matches
+/// The Arcium callback authority pubkey. For **local testing only**, this matches
 /// `tests/fixtures/arcium_callback_authority.json` so `anchor test` can sign callbacks
-/// without real MPC. Replace before mainnet.
+/// without real MPC.
+///
+/// **Production:** Replace with the pubkey Arcium documents for your network *or*
+/// redesign around an MXE `#[arcium_callback]` (see `mxe/poi_mxe`) so verification
+/// follows Arcium’s standard flow. There is no env-var override — recompile after changing.
 const ARCIUM_CALLBACK_AUTHORITY: Pubkey =
     pubkey!("frM1CnN1bvUDTHFSLCHQ7Mnb9PZp5u2fW7CLuWXscZM");

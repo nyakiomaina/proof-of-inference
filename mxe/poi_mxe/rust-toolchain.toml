@@ -1,0 +1,6 @@
+[toolchain]
+# `minimal` can end up without a usable host `cargo` for this channel (rustup / Solana toolchains).
+# Anchor/`arcium build` need `cargo` on the host.
+channel = "1.89.0"
+components = ["rustfmt", "clippy"]
+profile = "default"

@@ -13,6 +13,12 @@ test-ledger/
 dist/
 *.tsbuildinfo
 
+# Arcis / local circuit build output at repo root (regenerate via arcium / toolchain)
+/build/
+
+# Local agent / IDE (do not commit)
+.claude/
+
 # Env and secrets (keep local only)
 .env
 .env.*
