@@ -13,7 +13,8 @@ export type ProofOfInferenceIDL = {
   errors: any[];
 };
 
-export const IDL: ProofOfInferenceIDL = {
+export const IDL = {
+  address: "CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh",
   version: "0.1.0",
   name: "proof_of_inference",
   instructions: [

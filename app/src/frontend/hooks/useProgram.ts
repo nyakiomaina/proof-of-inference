@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { AnchorProvider, Program, Idl } from "@coral-xyz/anchor";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
-import idlJson from "../../../../target/idl/proof_of_inference.json";
+import { IDL as idlJson } from "../../idl";
 
 const PROGRAM_ID = new PublicKey((idlJson as { address: string }).address);
 
