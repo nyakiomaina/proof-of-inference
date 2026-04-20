@@ -4,6 +4,7 @@ import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { RegisterModelPanel } from "./components/RegisterModelPanel";
 import { RunInferencePanel } from "./components/RunInferencePanel";
 import { VerifyComparePanel } from "./components/VerifyComparePanel";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useDemoState } from "./hooks/useDemoState";
 
 function Dashboard() {
@@ -124,8 +125,10 @@ function FlowStep({ n, title, text }: { n: string; title: string; text: string }
 
 export function App() {
   return (
-    <WalletProvider>
-      <Dashboard />
-    </WalletProvider>
+    <ErrorBoundary>
+      <WalletProvider>
+        <Dashboard />
+      </WalletProvider>
+    </ErrorBoundary>
   );
 }
