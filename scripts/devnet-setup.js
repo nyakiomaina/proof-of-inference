@@ -71,11 +71,17 @@ async function main() {
   console.log("\n[2/5] Checking program deployment...");
   const idlPath = path.join(__dirname, "..", "target", "idl", "proof_of_inference.json");
   if (!fs.existsSync(idlPath)) {
-    console.error("  ERROR: target/idl/proof_of_inference.json not found. Run `anchor build` first.");
+    console.error("  ERROR: target/idl/proof_of_inference.json not found.");
+    console.error("  Run `anchor build` (Anchor CLI >= 1.0.0) first.");
+    console.error("  Tip: `avm use 1.0.0` if your active CLI is older.");
     process.exit(1);
   }
   const idl = JSON.parse(fs.readFileSync(idlPath, "utf8"));
   const programId = idl.address;
+  if (!programId) {
+    console.error("  ERROR: target/idl/proof_of_inference.json has no `address` field.");
+    process.exit(1);
+  }
   console.log("  Program ID:", programId);
 
   const programInfo = await connection.getAccountInfo(
