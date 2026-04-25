@@ -1,0 +1,920 @@
+{
+  "address": "CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh",
+  "metadata": {
+    "name": "proof_of_inference",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "On-chain verified AI inference attestation for Solana"
+  },
+  "instructions": [
+    {
+      "name": "callback_verified_inference",
+      "docs": [
+        "Callback invoked by the Arcium MPC network after confidential computation",
+        "completes. Only the designated Arcium callback authority can call this.",
+        "It writes the encrypted output, cluster metadata, and flips the status",
+        "to Verified. The model's lifetime inference counter is incremented."
+      ],
+      "discriminator": [
+        199,
+        159,
+        139,
+        151,
+        193,
+        7,
+        242,
+        75
+      ],
+      "accounts": [
+        {
+          "name": "verified_inference",
+          "writable": true
+        },
+        {
+          "name": "model_registry",
+          "writable": true
+        },
+        {
+          "name": "arcium_authority",
+          "docs": [
+            "The Arcium callback authority. Only this signer can finalize inferences."
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "output_data",
+          "type": "bytes"
+        },
+        {
+          "name": "cluster",
+          "type": "pubkey"
+        },
+        {
+          "name": "node_count",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "check_verification",
+      "docs": [
+        "CPI-callable verification check. Any Solana program can call this via CPI,",
+        "passing a VerifiedInference PDA, to get a structured verification result.",
+        "This is the composability surface — DeFi vaults, DAOs, and dApps consume",
+        "this to gate actions on proven AI computation."
+      ],
+      "discriminator": [
+        99,
+        44,
+        73,
+        238,
+        56,
+        170,
+        136,
+        125
+      ],
+      "accounts": [
+        {
+          "name": "verified_inference"
+        }
+      ],
+      "args": [],
+      "returns": {
+        "defined": {
+          "name": "VerificationResult"
+        }
+      }
+    },
+    {
+      "name": "fail_inference",
+      "docs": [
+        "Marks a pending inference as failed. Only callable by the Arcium callback",
+        "authority when the MPC computation could not complete successfully."
+      ],
+      "discriminator": [
+        224,
+        69,
+        171,
+        225,
+        252,
+        229,
+        167,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "verified_inference",
+          "writable": true
+        },
+        {
+          "name": "arcium_authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "register_model",
+      "docs": [
+        "Registers a new AI model on-chain by committing the SHA-256 hash of its weights.",
+        "The model owner also specifies which Arcium MXE configuration will host the model",
+        "for confidential computation. The actual weights never touch the chain."
+      ],
+      "discriminator": [
+        111,
+        236,
+        93,
+        31,
+        195,
+        210,
+        142,
+        125
+      ],
+      "accounts": [
+        {
+          "name": "model_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  111,
+                  100,
+                  101,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "arg",
+                "path": "weight_commitment"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mxe_config",
+          "docs": [
+            "The Arcium MXE configuration account. Validated off-chain during",
+            "model weight upload; stored here for reference."
+          ]
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "weight_commitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "model_name",
+          "type": "string"
+        },
+        {
+          "name": "model_version",
+          "type": "u16"
+        },
+        {
+          "name": "model_type",
+          "type": {
+            "defined": {
+              "name": "ModelType"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "request_inference",
+      "docs": [
+        "Requests a verified inference from a registered model. The user's input",
+        "is encrypted client-side before submission; only the encrypted blob and",
+        "a nonce are sent on-chain. A verification fee is transferred to the",
+        "protocol vault. The instruction creates a Pending VerifiedInference PDA",
+        "and emits an event that off-chain relayers / Arcium watchers use to",
+        "trigger the MPC computation."
+      ],
+      "discriminator": [
+        92,
+        72,
+        143,
+        109,
+        60,
+        207,
+        61,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "model_registry"
+        },
+        {
+          "name": "verified_inference",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  102,
+                  101,
+                  114,
+                  101,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "model_registry"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "requester",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "requester_token",
+          "writable": true
+        },
+        {
+          "name": "protocol_fee_vault",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "encrypted_input",
+          "type": "bytes"
+        },
+        {
+          "name": "nonce",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_model",
+      "docs": [
+        "Updates a registered model (owner only). Can toggle active status,",
+        "update the MXE config, or bump the version."
+      ],
+      "discriminator": [
+        76,
+        230,
+        44,
+        16,
+        103,
+        83,
+        24,
+        73
+      ],
+      "accounts": [
+        {
+          "name": "model_registry",
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "model_registry"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "active",
+          "type": {
+            "option": "bool"
+          }
+        },
+        {
+          "name": "mxe_config",
+          "type": {
+            "option": "pubkey"
+          }
+        },
+        {
+          "name": "model_version",
+          "type": {
+            "option": "u16"
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "ModelRegistry",
+      "discriminator": [
+        174,
+        72,
+        180,
+        46,
+        185,
+        165,
+        246,
+        200
+      ]
+    },
+    {
+      "name": "VerifiedInference",
+      "discriminator": [
+        199,
+        105,
+        232,
+        48,
+        122,
+        229,
+        71,
+        34
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "InferenceFailed",
+      "discriminator": [
+        188,
+        160,
+        228,
+        220,
+        86,
+        169,
+        164,
+        74
+      ]
+    },
+    {
+      "name": "InferenceRequested",
+      "discriminator": [
+        221,
+        6,
+        41,
+        160,
+        184,
+        105,
+        114,
+        15
+      ]
+    },
+    {
+      "name": "InferenceVerified",
+      "discriminator": [
+        141,
+        49,
+        77,
+        148,
+        87,
+        180,
+        45,
+        15
+      ]
+    },
+    {
+      "name": "ModelRegistered",
+      "discriminator": [
+        220,
+        196,
+        19,
+        71,
+        42,
+        237,
+        219,
+        138
+      ]
+    },
+    {
+      "name": "ModelUpdated",
+      "discriminator": [
+        176,
+        73,
+        246,
+        100,
+        211,
+        248,
+        16,
+        248
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "ModelNameTooLong",
+      "msg": "Model name exceeds maximum length of 64 bytes"
+    },
+    {
+      "code": 6001,
+      "name": "ModelInactive",
+      "msg": "Model is not active and cannot accept inference requests"
+    },
+    {
+      "code": 6002,
+      "name": "UnauthorizedCallback",
+      "msg": "Only the Arcium callback authority can finalize inferences"
+    },
+    {
+      "code": 6003,
+      "name": "InferenceNotPending",
+      "msg": "Inference is not in Pending status"
+    },
+    {
+      "code": 6004,
+      "name": "OutputDataTooLarge",
+      "msg": "Output data exceeds maximum allowed size"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidNodeCount",
+      "msg": "Node count must be greater than zero"
+    },
+    {
+      "code": 6006,
+      "name": "TokenOwnerMismatch",
+      "msg": "Token account owner does not match requester"
+    },
+    {
+      "code": 6007,
+      "name": "ModelMismatch",
+      "msg": "Model registry does not match the inference record"
+    }
+  ],
+  "types": [
+    {
+      "name": "InferenceFailed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "inference",
+            "type": "pubkey"
+          },
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InferenceRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "requester",
+            "type": "pubkey"
+          },
+          {
+            "name": "inference",
+            "type": "pubkey"
+          },
+          {
+            "name": "input_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InferenceVerified",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "inference",
+            "type": "pubkey"
+          },
+          {
+            "name": "node_count",
+            "type": "u8"
+          },
+          {
+            "name": "cluster",
+            "type": "pubkey"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ModelRegistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "weight_commitment",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "model_name",
+            "type": "string"
+          },
+          {
+            "name": "model_version",
+            "type": "u16"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ModelRegistry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "docs": [
+              "The wallet that registered and owns this model."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "weight_commitment",
+            "docs": [
+              "SHA-256 hash of the model weights — the on-chain identity of the model."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "model_name",
+            "docs": [
+              "Human-readable name (max 64 bytes)."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "model_version",
+            "docs": [
+              "Semver-style version number for the model."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "model_type",
+            "docs": [
+              "Classification of the model's purpose."
+            ],
+            "type": {
+              "defined": {
+                "name": "ModelType"
+              }
+            }
+          },
+          {
+            "name": "total_inferences",
+            "docs": [
+              "Lifetime count of verified inferences produced by this model."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "docs": [
+              "Unix timestamp when the model was registered."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "active",
+            "docs": [
+              "Whether the model is accepting inference requests."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "mxe_config",
+            "docs": [
+              "The Arcium MXE configuration account that hosts this model's encrypted weights."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ModelType",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "SentimentClassifier"
+          },
+          {
+            "name": "TextClassifier"
+          },
+          {
+            "name": "RiskScorer"
+          },
+          {
+            "name": "AnomalyDetector"
+          },
+          {
+            "name": "CustomClassifier"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ModelUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "active",
+            "type": "bool"
+          },
+          {
+            "name": "model_version",
+            "type": "u16"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerificationResult",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "verified",
+            "type": "bool"
+          },
+          {
+            "name": "model",
+            "type": "pubkey"
+          },
+          {
+            "name": "model_commitment",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "node_count",
+            "type": "u8"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "cluster",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerificationStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Pending"
+          },
+          {
+            "name": "Verified"
+          },
+          {
+            "name": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VerifiedInference",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "model",
+            "docs": [
+              "The ModelRegistry PDA that this inference was requested against."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "model_commitment",
+            "docs": [
+              "Snapshot of the model's weight_commitment at request time."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "nonce",
+            "docs": [
+              "Request nonce used to derive this VerifiedInference PDA."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "input_hash",
+            "docs": [
+              "SHA-256 hash of the encrypted input blob."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "output_hash",
+            "docs": [
+              "SHA-256 hash of the output data (set after callback)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "output_data",
+            "docs": [
+              "The encrypted output data from the MPC computation (sealed to requester)."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "requester",
+            "docs": [
+              "The wallet that requested this inference."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "arcium_cluster",
+            "docs": [
+              "The Arcium cluster that performed the MPC computation."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "node_count",
+            "docs": [
+              "Number of MPC nodes that participated."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "timestamp",
+            "docs": [
+              "Unix timestamp when the inference was requested."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "status",
+            "docs": [
+              "Current verification status."
+            ],
+            "type": {
+              "defined": {
+                "name": "VerificationStatus"
+              }
+            }
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

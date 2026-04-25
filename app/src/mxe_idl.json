@@ -1,0 +1,4 @@
+{
+  "_stub": true,
+  "_note": "Placeholder. Run `arcium build` in mxe/poi_mxe then `npm run sync-idl` to populate."
+}

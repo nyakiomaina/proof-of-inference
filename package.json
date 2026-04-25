@@ -9,6 +9,7 @@
     "build:client": "tsc -p tsconfig.client.json",
     "dev": "cd app && npm run dev",
     "build:app": "cd app && npm run build",
+    "sync-idl": "cp target/idl/proof_of_inference.json app/src/idl.json && cp target/types/proof_of_inference.ts app/src/proof_of_inference.ts && node scripts/sync-mxe-idl.cjs",
     "listen:inference": "node scripts/watch-inference-requested.cjs",
     "mxe:build": "cd mxe/poi_mxe && arcium build",
     "mxe:test": "cd mxe/poi_mxe && yarn install && arcium test"
