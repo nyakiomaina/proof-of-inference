@@ -68,6 +68,28 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
 
       const [modelPda] = findModelPda(publicKey, commitment);
 
+      const existing = await (program.account as any).modelRegistry
+        .fetchNullable(modelPda)
+        .catch(() => null);
+
+      if (existing) {
+        const model: RegisteredModel = {
+          pda: modelPda.toBase58(),
+          owner: publicKey.toBase58(),
+          name: existing.modelName as string,
+          version: Number(existing.modelVersion),
+          type: modelType,
+          weightCommitment: toHex(commitment),
+          totalInferences: Number(existing.totalInferences ?? 0),
+          createdAt: Number(existing.createdAt ?? Math.floor(Date.now() / 1000)),
+          tx: "",
+        };
+        onRegister(model);
+        setResult(model);
+        setError("Model already registered on-chain — loaded existing PDA.");
+        return;
+      }
+
       const mxeId = import.meta.env.VITE_MXE_PROGRAM_ID;
       const mxeConfig = mxeId ? new PublicKey(mxeId) : SystemProgram.programId;
 
@@ -102,7 +124,14 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
       setResult(model);
     } catch (err: any) {
       console.error("register_model failed:", err);
-      setError(err.message ?? String(err));
+      const msg = err?.message ?? String(err);
+      if (msg.includes("already in use")) {
+        setError(
+          "That model PDA is already allocated on-chain. Change the Weight commitment input to register a new model, or use the existing one in the Run inference panel."
+        );
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }

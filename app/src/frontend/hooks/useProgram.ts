@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { AnchorProvider, Program, Idl } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import { IDL as idlJson } from "../../idl";
 
 const PROGRAM_ID = new PublicKey((idlJson as { address: string }).address);
@@ -9,6 +9,11 @@ const PROGRAM_ID = new PublicKey((idlJson as { address: string }).address);
 /**
  * Returns an Anchor Program instance connected to the user's wallet.
  * Returns `null` when the wallet is not connected.
+ *
+ * Typed as `Program<Idl>` (not the generated strict type) because the UI
+ * layer mutates the `.accounts({...})` shape in places; the strict type adds
+ * friction without catching real bugs since the IDL itself is generated from
+ * the Rust program and stays in sync.
  */
 export function useProgram() {
   const { connection } = useConnection();
@@ -23,10 +28,9 @@ export function useProgram() {
     );
   }, [connection, wallet.publicKey, wallet.signTransaction]);
 
-  const program = useMemo(() => {
+  const program = useMemo<Program | null>(() => {
     if (!provider) return null;
-    const idl: Idl = { ...(idlJson as object) } as Idl;
-    return new Program(idl, provider);
+    return new Program(idlJson as Idl, provider);
   }, [provider]);
 
   return { program, provider, programId: PROGRAM_ID };

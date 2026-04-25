@@ -5,16 +5,52 @@ interface Props {
   inferences: VerifiedInferenceRecord[];
 }
 
+interface DisplayOutput {
+  label: string;
+  confidence: number | null;
+  score: number | null;
+}
+
+function parseOutput(outputData: string): DisplayOutput | null {
+  if (!outputData) return null;
+  try {
+    const p = JSON.parse(outputData);
+    const label = typeof p.label === "string" ? p.label : labelFor(p.classification);
+    const confidence =
+      typeof p.confidence === "number" ? p.confidence : null;
+    const score = typeof p.score === "number" ? p.score : null;
+    if (!label && confidence === null && score === null) return null;
+    return { label: label ?? "Unknown", confidence, score };
+  } catch {
+    return null;
+  }
+}
+
+function labelFor(classification: unknown): string | null {
+  if (typeof classification !== "number") return null;
+  switch (classification) {
+    case 0:
+      return "Negative";
+    case 1:
+      return "Neutral";
+    case 2:
+      return "Positive";
+    default:
+      return null;
+  }
+}
+
+function flipLabel(label: string): string {
+  if (label === "Positive") return "Negative";
+  if (label === "Negative") return "Positive";
+  return "Neutral";
+}
+
 export function VerifyComparePanel({ inferences }: Props) {
   const latestVerified = inferences.find((i) => i.status === "Verified");
-
-  let verifiedResult: { label: string; confidence: number } | null = null;
-  if (latestVerified?.outputData) {
-    try {
-      const parsed = JSON.parse(latestVerified.outputData);
-      verifiedResult = { label: parsed.label, confidence: parsed.confidence };
-    } catch {}
-  }
+  const verifiedResult = latestVerified
+    ? parseOutput(latestVerified.outputData)
+    : null;
 
   return (
     <div className="card">
@@ -33,16 +69,32 @@ export function VerifyComparePanel({ inferences }: Props) {
               <span className="badge-verified">proven</span>
             </div>
 
-            {verifiedResult && (
-              <div className={`text-xl font-semibold ${
-                verifiedResult.label === "Positive" ? "text-emerald-400"
-                  : verifiedResult.label === "Negative" ? "text-red-400"
-                  : "text-yellow-400"
-              }`}>
+            {verifiedResult ? (
+              <div
+                className={`text-xl font-semibold ${
+                  verifiedResult.label === "Positive"
+                    ? "text-emerald-400"
+                    : verifiedResult.label === "Negative"
+                      ? "text-red-400"
+                      : "text-yellow-400"
+                }`}
+              >
                 {verifiedResult.label}
-                <span className="text-sm font-normal text-gray-500 ml-2">
-                  {(verifiedResult.confidence * 100).toFixed(1)}%
-                </span>
+                {verifiedResult.confidence !== null && (
+                  <span className="text-sm font-normal text-gray-500 ml-2">
+                    {(verifiedResult.confidence * 100).toFixed(1)}%
+                  </span>
+                )}
+                {verifiedResult.confidence === null &&
+                  verifiedResult.score !== null && (
+                    <span className="text-sm font-normal text-gray-500 ml-2">
+                      score {verifiedResult.score}
+                    </span>
+                  )}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-500 font-mono break-all">
+                {latestVerified.outputData || "(no output data)"}
               </div>
             )}
 
@@ -68,7 +120,7 @@ export function VerifyComparePanel({ inferences }: Props) {
 
             {verifiedResult && (
               <div className="text-xl font-semibold text-gray-600">
-                {verifiedResult.label === "Positive" ? "Negative" : "Positive"}
+                {flipLabel(verifiedResult.label)}
                 <span className="text-sm font-normal text-gray-700 ml-2">80.0%</span>
               </div>
             )}

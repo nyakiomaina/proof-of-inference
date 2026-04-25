@@ -28,9 +28,9 @@ export interface VerifiedInferenceRecord {
 }
 
 /**
- * Shared demo state across all panels.
- * The UI requires a connected Solana wallet to register models and run inferences;
- * the chain flow itself is still simulated locally (no program txs yet) until wired to a program.
+ * Shared UI state for registered models and verified inferences. Actual Solana
+ * transactions are submitted by the panels themselves; this hook only mirrors
+ * the results client-side so all panels see the same list.
  */
 export function useDemoState() {
   const [models, setModels] = useState<RegisteredModel[]>([]);
@@ -39,10 +39,17 @@ export function useDemoState() {
 
   const registerModel = useCallback(
     (model: RegisteredModel) => {
-      setModels((prev) => [...prev, model]);
+      setModels((prev) => {
+        if (prev.some((m) => m.pda === model.pda)) return prev;
+        return [...prev, model];
+      });
     },
     []
   );
+
+  const loadModels = useCallback((next: RegisteredModel[]) => {
+    setModels(next);
+  }, []);
 
   const addInference = useCallback(
     (inference: VerifiedInferenceRecord) => {
@@ -79,6 +86,7 @@ export function useDemoState() {
     loading,
     setLoading,
     registerModel,
+    loadModels,
     addInference,
     updateInference,
     incrementModelInferences,
