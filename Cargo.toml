@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "programs/proof-of-inference",
-    "confidential",
+    "programs/poi-consumer",
 ]
 resolver = "2"
 

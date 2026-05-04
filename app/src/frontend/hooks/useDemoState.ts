@@ -12,6 +12,8 @@ export interface RegisteredModel {
   tx: string;
 }
 
+export type VerificationRoute = "MPC" | "Legacy" | "Unknown";
+
 export interface VerifiedInferenceRecord {
   pda: string;
   modelPda: string;
@@ -25,6 +27,23 @@ export interface VerifiedInferenceRecord {
   status: "Pending" | "Verified" | "Failed";
   requester: string;
   tx: string;
+  /** Which finalization path produced `output_data` — derived from its layout. */
+  route: VerificationRoute;
+}
+
+/**
+ * Maps a raw `output_data` byte length to the path that produced it.
+ *   - 64 bytes → Arcium MXE callback CPI (`classification_ct[32] || score_ct[32]`),
+ *     the only production path.
+ *   - any other non-empty length → finalized by an older off-chain script that
+ *     pre-dated the MXE → main CPI; surfaced as "Legacy" so the demo is honest
+ *     about historical records but never produced by current code.
+ *   - empty → Pending or otherwise not finalized yet.
+ */
+export function classifyRoute(outputDataBytes: number): VerificationRoute {
+  if (outputDataBytes === 64) return "MPC";
+  if (outputDataBytes > 0) return "Legacy";
+  return "Unknown";
 }
 
 /**
@@ -49,6 +68,10 @@ export function useDemoState() {
 
   const loadModels = useCallback((next: RegisteredModel[]) => {
     setModels(next);
+  }, []);
+
+  const loadInferences = useCallback((next: VerifiedInferenceRecord[]) => {
+    setInferences(next);
   }, []);
 
   const addInference = useCallback(
@@ -87,6 +110,7 @@ export function useDemoState() {
     setLoading,
     registerModel,
     loadModels,
+    loadInferences,
     addInference,
     updateInference,
     incrementModelInferences,

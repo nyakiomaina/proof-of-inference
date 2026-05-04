@@ -29,7 +29,7 @@ mod circuits {
     }
 
     #[instruction]
-    pub fn run_inference(
+    pub fn run_inference_v2(
         input_ctxt: Enc<Shared, InferenceInput>,
     ) -> Enc<Shared, InferenceOutput> {
         let inp = input_ctxt.to_arcis();

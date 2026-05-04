@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { PoiMxeScaffold } from "../target/types/poi_mxe_scaffold";
 import { randomBytes } from "crypto";
 import {
@@ -27,8 +27,24 @@ import * as fs from "fs";
 import * as os from "os";
 import { expect } from "chai";
 
+/**
+ * Smoke test for the deployed `run_inference_v2` Arcis circuit + MXE program.
+ *
+ * Flow:
+ *   1. Init the run_inference_v2 computation definition + upload the circuit.
+ *   2. Encrypt 6 u8 inputs (w0, w1, bias, threshold, f0, f1) with the MXE
+ *      public key + a per-request Rescue nonce.
+ *   3. Queue a computation. We pass placeholder pubkeys for the
+ *      proof-of-inference CPI extras (the callback's CPI back into the main
+ *      program is exercised by the e2e tests in the root workspace; here we
+ *      only verify the MPC roundtrip itself is healthy).
+ *   4. Await the InferenceResultEvent and decrypt both ciphertexts.
+ *   5. Assert classification + score are consistent with the plaintext
+ *      computation `score = bias + f0*w0 + f1*w1`, `classification = score > threshold`.
+ *
+ * NOTE: requires `arcium localnet` running. `arcium test` boots it for you.
+ */
 describe("PoiMxeScaffold", () => {
-  // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
   const program = anchor.workspace
     .PoiMxeScaffold as Program<PoiMxeScaffold>;
@@ -53,46 +69,59 @@ describe("PoiMxeScaffold", () => {
   const arciumEnv = getArciumEnv();
   const clusterAccount = getClusterAccAddress(arciumEnv.arciumClusterOffset);
 
-  it("Is initialized!", async () => {
+  it("queues run_inference_v2 and finalizes with a verifiable result", async () => {
     const owner = readKpJson(`${os.homedir()}/.config/solana/id.json`);
 
-    console.log("Initializing add together computation definition");
-    const initATSig = await initAddTogetherCompDef(program, owner);
-    console.log(
-      "Add together computation definition initialized with signature",
-      initATSig,
-    );
+    console.log("Initializing run_inference_v2 computation definition");
+    const initSig = await initRunInferenceV2CompDef(program, owner);
+    console.log("  init sig:", initSig);
 
     const mxePublicKey = await getMXEPublicKeyWithRetry(
       provider as anchor.AnchorProvider,
       program.programId,
     );
+    console.log("MXE x25519 pubkey:", mxePublicKey);
 
-    console.log("MXE x25519 pubkey is", mxePublicKey);
-
-    const privateKey = x25519.utils.randomSecretKey();
-    const publicKey = x25519.getPublicKey(privateKey);
-
-    const sharedSecret = x25519.getSharedSecret(privateKey, mxePublicKey);
+    const ephemeralSecret = x25519.utils.randomSecretKey();
+    const ephemeralPublicKey = x25519.getPublicKey(ephemeralSecret);
+    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, mxePublicKey);
     const cipher = new RescueCipher(sharedSecret);
 
-    const val1 = BigInt(1);
-    const val2 = BigInt(2);
-    const plaintext = [val1, val2];
+    // Plaintext that should classify as "above threshold":
+    //   score = 10 + 7*3 + 4*2 = 39   ← below 30 threshold? let's pick numbers
+    //   that exceed the threshold to assert a deterministic class.
+    //   With w0=3, w1=2, bias=10, threshold=30, f0=7, f1=4 → score = 39 > 30 → class 1.
+    const w0 = BigInt(3);
+    const w1 = BigInt(2);
+    const bias = BigInt(10);
+    const threshold = BigInt(30);
+    const f0 = BigInt(7);
+    const f1 = BigInt(4);
+    const expectedScore = Number(bias + f0 * w0 + f1 * w1);
+    const expectedClass = expectedScore > Number(threshold) ? 1 : 0;
 
+    const plaintext = [w0, w1, bias, threshold, f0, f1];
     const nonce = randomBytes(16);
     const ciphertext = cipher.encrypt(plaintext, nonce);
 
-    const sumEventPromise = awaitEvent("sumEvent");
+    const eventPromise = awaitEvent("inferenceResultEvent");
     const computationOffset = new anchor.BN(randomBytes(8), "hex");
 
+    // Placeholder pubkeys for the proof-of-inference CPI extras. Required by
+    // the program signature but the CPI itself isn't exercised here — see the
+    // root workspace tests for the cross-program flow. SystemProgram is a
+    // safe stand-in (it exists in every cluster).
+    const placeholder = SystemProgram.programId;
+
     const queueSig = await program.methods
-      .addTogether(
+      .runInferenceV2(
         computationOffset,
-        Array.from(ciphertext[0]),
-        Array.from(ciphertext[1]),
-        Array.from(publicKey),
+        ciphertext.map((ct) => Array.from(ct)),
+        Array.from(ephemeralPublicKey),
         new anchor.BN(deserializeLE(nonce).toString()),
+        placeholder,
+        placeholder,
+        placeholder,
       )
       .accountsPartial({
         computationAccount: getComputationAccAddress(
@@ -107,11 +136,11 @@ describe("PoiMxeScaffold", () => {
         ),
         compDefAccount: getCompDefAccAddress(
           program.programId,
-          Buffer.from(getCompDefAccOffset("add_together")).readUInt32LE(),
+          Buffer.from(getCompDefAccOffset("run_inference_v2")).readUInt32LE(),
         ),
       })
       .rpc({ skipPreflight: true, commitment: "confirmed" });
-    console.log("Queue sig is ", queueSig);
+    console.log("  queue sig:", queueSig);
 
     const finalizeSig = await awaitComputationFinalization(
       provider as anchor.AnchorProvider,
@@ -119,35 +148,55 @@ describe("PoiMxeScaffold", () => {
       program.programId,
       "confirmed",
     );
-    console.log("Finalize sig is ", finalizeSig);
+    console.log("  finalize sig:", finalizeSig);
 
-    const sumEvent = await sumEventPromise;
-    const decrypted = cipher.decrypt([sumEvent.sum], sumEvent.nonce)[0];
-    expect(decrypted).to.equal(val1 + val2);
+    const event = await eventPromise;
+    // The MXE callback will likely fail when CPI'ing into SystemProgram with
+    // the placeholder accounts — but the InferenceResultEvent is emitted
+    // *before* the CPI, so we still observe the encrypted MPC output.
+    const decrypted = cipher.decrypt(
+      [event.classificationCt, event.confidenceCt],
+      event.nonce,
+    );
+    const classification = Number(decrypted[0]);
+    const score = Number(decrypted[1]);
+
+    console.log("  decrypted:", { classification, score });
+    expect(classification).to.equal(expectedClass);
+    expect(score).to.equal(expectedScore);
   });
 
-  async function initAddTogetherCompDef(
+  async function initRunInferenceV2CompDef(
     program: Program<PoiMxeScaffold>,
     owner: anchor.web3.Keypair,
   ): Promise<string> {
     const baseSeedCompDefAcc = getArciumAccountBaseSeed(
       "ComputationDefinitionAccount",
     );
-    const offset = getCompDefAccOffset("add_together");
+    const offset = getCompDefAccOffset("run_inference_v2");
 
     const compDefPDA = PublicKey.findProgramAddressSync(
       [baseSeedCompDefAcc, program.programId.toBuffer(), offset],
       getArciumProgramId(),
     )[0];
-
-    console.log("Comp def pda is ", compDefPDA);
+    console.log("  comp def PDA:", compDefPDA.toBase58());
 
     const mxeAccount = getMXEAccAddress(program.programId);
     const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
-    const lutAddress = getLookupTableAddress(program.programId, mxeAcc.lutOffsetSlot);
+    const lutAddress = getLookupTableAddress(
+      program.programId,
+      mxeAcc.lutOffsetSlot,
+    );
+
+    // Skip if the comp def already exists (test runs are idempotent).
+    const existing = await provider.connection.getAccountInfo(compDefPDA);
+    if (existing) {
+      console.log("  comp def already initialized — skipping init + upload");
+      return "already-initialized";
+    }
 
     const sig = await program.methods
-      .initAddTogetherCompDef()
+      .initRunInferenceV2CompDef()
       .accounts({
         compDefAccount: compDefPDA,
         payer: owner.publicKey,
@@ -155,15 +204,12 @@ describe("PoiMxeScaffold", () => {
         addressLookupTable: lutAddress,
       })
       .signers([owner])
-      .rpc({
-        commitment: "confirmed",
-      });
-    console.log("Init add together computation definition transaction", sig);
+      .rpc({ commitment: "confirmed" });
 
-    const rawCircuit = fs.readFileSync("build/add_together.arcis");
+    const rawCircuit = fs.readFileSync("build/run_inference_v2.arcis");
     await uploadCircuit(
       provider as anchor.AnchorProvider,
-      "add_together",
+      "run_inference_v2",
       program.programId,
       rawCircuit,
       true,
@@ -192,13 +238,10 @@ async function getMXEPublicKeyWithRetry(
         return mxePublicKey;
       }
     } catch (error) {
-      console.log(`Attempt ${attempt} failed to fetch MXE public key:`, error);
+      console.log(`  attempt ${attempt} failed:`, error);
     }
 
     if (attempt < maxRetries) {
-      console.log(
-        `Retrying in ${retryDelayMs}ms... (attempt ${attempt}/${maxRetries})`,
-      );
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }

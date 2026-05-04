@@ -7,6 +7,7 @@ import { VerifyComparePanel } from "./components/VerifyComparePanel";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useDemoState } from "./hooks/useDemoState";
 import { useOnChainModels } from "./hooks/useOnChainModels";
+import { useOnChainInferences } from "./hooks/useOnChainInferences";
 import { useProgram } from "./hooks/useProgram";
 
 function Dashboard() {
@@ -17,6 +18,7 @@ function Dashboard() {
     setLoading,
     registerModel,
     loadModels,
+    loadInferences,
     addInference,
     updateInference,
     incrementModelInferences,
@@ -24,6 +26,7 @@ function Dashboard() {
 
   const { program } = useProgram();
   useOnChainModels(program, loadModels);
+  useOnChainInferences(program, loadInferences);
 
   return (
     <div className="min-h-screen bg-gray-950">

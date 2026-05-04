@@ -1,136 +1,139 @@
 # Proof of Inference
 
-Verified on-chain attestations of AI model inference on Solana, using Arcium MPC for confidential computation.
+Cryptographic, on-chain attestations of AI model inference on Solana — every output is signed off by an Arcium MPC cluster, finalized through a Cross-Program Invocation, and consumable by any other Solana program.
 
-A model owner registers a model by committing a hash of its weights to a Solana PDA. When a user requests inference, their inputs are encrypted client-side and submitted to the Arcium MPC network, where nodes jointly compute the result without any single node seeing the full data. The output and verification metadata are written back on-chain, and any Solana program can verify the attestation via CPI.
+A model owner registers a model by committing a SHA-256 hash of its weights to a PDA. When a user requests inference their inputs are encrypted client-side (x25519 + Rescue), the Arcium MPC nodes jointly run the circuit without any single node seeing full data, and the MXE callback **CPIs back into `proof-of-inference`** to flip the on-chain `VerifiedInference` PDA to `Verified` with the encrypted output and cluster metadata in a single MPC trip — no off-chain relayer.
 
 ## Why this matters
 
-AI agents are making decisions in DeFi, governance, and autonomous systems, but there is no way to verify that a specific model actually produced a specific output. Any agent can claim "my model said X" with zero proof. Proof of Inference closes this gap by creating a cryptographic attestation that a registered model ran a specific computation -- without revealing model weights, user inputs, or intermediate state.
+AI agents make decisions in DeFi, governance, and autonomous systems, but today an agent can claim "my model said X" with zero proof. Proof of Inference closes that gap: the on-chain attestation is bound to (a) the SHA-256 of the model weights, (b) the Arcium cluster that ran it, (c) the count of attesting MPC nodes. Other programs gate decisions on `check_verification` via CPI — the included `poi-consumer` program is a one-instruction example.
 
-## Deployed programs (devnet)
+## Programs
 
-| Program | ID |
-|---|---|
-| proof-of-inference (Anchor) | `CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh` |
-| poi_mxe (Arcium MXE scaffold) | `5D8rVRC34GVskVdYVAHnkBwrxCdTKhT4TpJ5CMswu6Mp` |
+| Program | Address (after redeploy) | Purpose |
+|---|---|---|
+| `proof_of_inference` | `5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh` | Model registry, inference PDAs, callback, `check_verification` |
+| `poi_consumer`        | `EqDLfkt6ZVyTo1ga3KtkFpV93qZFZZqQfpkZgMoDFcaj` | Demo consumer: gates an action on a verified inference via CPI |
+| `poi_mxe_scaffold`    | `EFZ1VFf9ws338N9YktYuVQXB8ascEhQ3agtRvVE2rzKF` | Arcium MXE: queues `run_inference`, callback CPIs into `proof_of_inference` |
+
+The program IDs above match the keypairs in `target/deploy/` and `mxe/poi_mxe/target/deploy/`. After cloning, `anchor deploy` will use these same IDs as long as the keypair files are present.
 
 ## Architecture
 
 ```
-User                   Solana                    Arcium MPC Network
- |                       |                             |
- |-- register_model ---->| (PDA: SHA-256 weight hash)  |
- |                       |                             |
- |-- encrypt inputs -----|---> queue_computation ----->|
- |   (x25519 + Rescue)   |    (MXE scaffold)          |
- |                       |                             |
- |                       |<--- callback_verified ------|
- |                       |    (encrypted result +      |
- |                       |     verification metadata)  |
- |                       |                             |
- |<-- check_verification-|                             |
+User                 proof_of_inference          poi_mxe_scaffold        Arcium MPC
+ |                          |                          |                      |
+ |-- register_model ------->|  (PDA: SHA-256(weights)) |                      |
+ |                          |                          |                      |
+ |-- request_inference ---->|  (Pending PDA + fee)     |                      |
+ |                          |                          |                      |
+ |-- run_inference -------->|------------------------->|--- queue_computation>|
+ |   (encrypted u8 inputs)  |                          |                      |
+ |                          |                          |<-- signed output ----|
+ |                          |<-- callback_verified ----|   (MXE invoke_signed)|
+ |                          |   (64-byte ciphertext +  |                      |
+ |                          |    cluster + node_count) |                      |
+ |                          |                          |                      |
+other program  ──CPI──►  check_verification  ─►  Returns VerificationResult
 ```
 
-1. **Register model** -- Owner commits a SHA-256 hash of model weights to a PDA. Stores MXE config pubkey for Arcium routing.
-2. **Encrypt inputs** -- Client encrypts input features using Arcium's x25519 + Rescue cipher (`@arcium-hq/client`).
-3. **Queue computation** -- Encrypted ciphertexts are submitted to the MXE scaffold program, which queues the job on the Arcium MPC network.
-4. **MPC inference** -- Cluster nodes jointly compute the inference. No single node sees full data.
-5. **Callback** -- Arcium's callback authority writes encrypted results + verification metadata on-chain, sets status to `Verified`.
-6. **Verification** -- Any program can read the PDA or call `check_verification` via CPI.
+1. **Register model** — owner commits SHA-256 hash of `(w0, w1, bias, threshold)` to a PDA.
+2. **Encrypt inputs** — frontend encrypts the 6-tuple `(w0, w1, bias, threshold, f0, f1)` client-side using Arcium's x25519 + Rescue cipher.
+3. **Queue computation** — the MXE program forwards the ciphertexts to the Arcium MPC network along with the `poi_program / poi_inference / poi_model_registry` extra accounts so the callback can finalize them.
+4. **MPC inference** — cluster nodes jointly compute `score = bias + f0*w0 + f1*w1`, classify against `threshold`, and return two encrypted bytes (`classification`, `score`) sealed to the requester's pubkey.
+5. **Callback CPI** — the MXE callback verifies the cluster signature, then `invoke_signed`s into `proof_of_inference::callback_verified_inference` (signing as its own `ArciumSignerAccount` PDA) with the 64-byte output blob and the real `node_count` from the cluster account. The on-chain status flips to `Verified` end-to-end without any off-chain relayer.
+6. **Consume** — any program calls `check_verification` via CPI and reads the typed `VerificationResult` from `get_return_data()`. See `programs/poi-consumer/` for a worked example.
 
 ## The MPC circuit
 
-A sentiment classifier using u8 fixed-point arithmetic: 2 weights + bias + threshold + 2 input features. Computes a dot product, applies a piecewise rational sigmoid approximation (avoids `exp()` in MPC), and thresholds to produce a classification + confidence score. The output is encrypted.
+A minimal linear classifier in Arcis (`mxe/poi_mxe/encrypted-ixs/src/lib.rs`):
 
-Note: the sigmoid approximation is **not** the standard logistic function. When the linear score is exactly zero, the approximation yields confidence = 1.0, not 0.5. See `confidential/src/lib.rs` for details.
+```
+score          = bias + f0*w0 + f1*w1     // u16, no overflow checks needed for u8 inputs
+classification = score >= threshold ? 1 : 0
+```
+
+Both `classification` and `score` are returned as Rescue-encrypted u8 ciphertexts (32 bytes each), sealed to the requester's ephemeral x25519 pubkey supplied at queue time. The frontend decrypts them after observing the `VerifiedInference` PDA flip to `Verified`.
+
+The on-chain `weight_commitment` is `SHA-256("poi-weights-v1" || w0 || w1 || bias || threshold)` — the same four bytes the circuit consumes — so the on-chain commitment is bound to the actual MPC inputs (not just metadata). See `app/src/frontend/lib/modelWeights.ts`.
 
 ## Project structure
 
 ```
-programs/proof-of-inference/     Anchor program (v1.0.0): register_model, request_inference,
-                                 callback_verified_inference, check_verification,
-                                 update_model, fail_inference
+programs/
+  proof-of-inference/             Main Anchor program (v1.0). register_model,
+                                  request_inference, callback_verified_inference,
+                                  fail_inference, update_model, check_verification.
+                                  build.rs bakes in the two callback-signer pubkeys.
 
-mxe/poi_mxe/                    Arcium MXE scaffold (Anchor 0.32.1): arcium build/deploy/test.
-                                 Contains encrypted-ixs/, the arcis circuit, and build artifacts.
+  poi-consumer/                   Demo consumer (v1.0). One instruction
+                                  (`gated_action`) that CPIs into check_verification,
+                                  asserts node_count + model commitment, then logs.
 
-confidential/                   Reference implementation of inference logic. Plaintext (no Arcis)
-                                 for unit testing; feature-gated arcis circuit for MPC.
+mxe/poi_mxe/                      Arcium MXE scaffold (Anchor 0.32). `arcium build`,
+                                  `arcium test`, `arcium deploy`. Callback
+                                  CPIs into the main program via invoke_signed.
 
-app/                            React 18 frontend (Vite + Tailwind). Wallet Adapter integration
-                                 (Phantom, Solflare). Arcium encryption helpers in
-                                 app/src/frontend/lib/arciumInference.ts.
+app/                              Vite + React 18 + Tailwind frontend. Wallet Adapter
+                                  (Phantom, Solflare). Arcium client-side encryption
+                                  via @arcium-hq/client + arcium-rescue.
 
 scripts/
-  devnet-setup.js               Creates SPL token mint + accounts for devnet fee mechanism.
-  devnet-callback.js            Simulates Arcium callback for devnet testing.
-  watch-inference-requested.cjs Log subscriber for on-chain Inference* events.
+  devnet-setup.js                 One-shot SPL mint + ATAs for the verification fee.
+  fetch-user-inferences.cjs       Read-only: list a wallet's VerifiedInference PDAs.
 
 tests/
-  proof-of-inference.ts         Local e2e: register -> request -> mock callback -> verified.
-  fixtures/                     Test keypairs (not for production use).
+  proof-of-inference.ts           Local e2e: register → request → simulated callback → verified.
+  poi-consumer.ts                 Local e2e: gated_action CPI happy + sad paths.
+  fixtures/                       Test-only callback authority keypair.
 ```
 
 ## Prerequisites
 
-- **Rust** (stable) + **Solana CLI** + **Anchor CLI 1.0.x**
-- **Arcium CLI** (`arcup`) -- for the MXE scaffold under `mxe/poi_mxe/`
-- **Node.js v22+**
-- A Solana wallet with devnet SOL (~10 SOL recommended)
-- A devnet RPC endpoint (Helius free tier recommended for circuit upload)
+- Rust (stable), Solana CLI, **Anchor CLI 1.0.x** (root) and **0.32.x** (MXE).
+- Arcium CLI (`arcup install`).
+- Node.js v22+.
+- A devnet wallet with ~10 SOL.
+- A reliable devnet RPC (Helius free tier strongly recommended for circuit upload).
 
 ## Build and test (local)
-
-Run the full on-chain loop with a local validator -- no devnet needed:
 
 ```bash
 npm install
 npm test
 ```
 
-This runs `anchor test --validator legacy`, which spins up `solana-test-validator`, deploys the program, and executes the TS test suite. The test uses a local keypair as a stand-in for Arcium's callback authority.
+This runs `anchor test --validator legacy`, which spins up `solana-test-validator`, deploys both `proof_of_inference` and `poi_consumer`, and executes the full TypeScript test suite. The callback signer in tests is `tests/fixtures/arcium_callback_authority.json` (the test-only branch of `is_authorized_callback_signer`).
 
-Individual build commands:
-
-```bash
-# Anchor program + IDL
-anchor build
-
-# Full workspace (program + confidential reference crate)
-cargo build
-
-# Reference inference logic only (no Solana, no Arcis)
-cargo test -p proof-of-inference-circuit --lib
-```
-
-If Anchor reports a program ID mismatch:
+Other useful commands:
 
 ```bash
-anchor keys sync
+anchor build                      # main + consumer programs
+cd mxe/poi_mxe && arcium build    # MXE circuit + scaffold
+npm run sync-idl                  # copy IDLs into app/src/ for the frontend
 ```
 
 ## Devnet deployment
 
-### 1. Deploy the main Anchor program
+### 1. Deploy the main + consumer programs
 
 ```bash
 anchor build
 anchor deploy --provider.cluster devnet
 ```
 
-### 2. Deploy the MXE scaffold
+If the program IDs in `Anchor.toml` and `declare_id!` don't match (e.g. you regenerated keypairs):
+
+```bash
+anchor keys sync && anchor build && anchor deploy --provider.cluster devnet
+```
+
+### 2. Deploy the MXE scaffold and upload the circuit
 
 ```bash
 cd mxe/poi_mxe
-arcium build --skip-program
-anchor build
+arcium build
 anchor deploy --provider.cluster devnet
-```
-
-### 3. Initialize the MXE
-
-```bash
 arcium deploy \
   --keypair-path ~/.config/solana/id.json \
   --cluster-offset 456 \
@@ -139,71 +142,83 @@ arcium deploy \
   -u devnet
 ```
 
-### 4. Upload the circuit
-
-Run `scripts/init-comp-def.ts` with a reliable RPC (Helius recommended -- public devnet endpoint will likely fail for large transactions):
+If you change the MXE program ID, recompute the callback signer PDA and re-deploy `proof_of_inference` so it accepts the new MXE:
 
 ```bash
-npx ts-node scripts/init-comp-def.ts
+NEW_MXE_ID=$(solana address -k mxe/poi_mxe/target/deploy/poi_mxe_scaffold-keypair.json)
+NEW_SIGN_PDA=$(solana find-program-derived-address $NEW_MXE_ID string:ArciumSignerAccount | head -1)
+POI_MXE_SIGN_PDA=$NEW_SIGN_PDA anchor build
+anchor deploy --provider.cluster devnet
 ```
 
-### 5. Create token accounts
+### 3. Create the SPL token + protocol fee accounts
 
 ```bash
 node scripts/devnet-setup.js
 ```
 
-This creates the SPL token mint and associated accounts. Note the output values for `VITE_REQUESTER_TOKEN_ACCOUNT` and `VITE_PROTOCOL_FEE_VAULT`.
+Note the printed `VITE_REQUESTER_TOKEN_ACCOUNT` and `VITE_PROTOCOL_FEE_VAULT` values.
 
-### 6. Run the frontend
+### 4. Run the frontend
 
 ```bash
 cd app
 cp .env.example .env
-# Fill in VITE_REQUESTER_TOKEN_ACCOUNT and VITE_PROTOCOL_FEE_VAULT from step 5
-# Set VITE_MXE_PROGRAM_ID=5D8rVRC34GVskVdYVAHnkBwrxCdTKhT4TpJ5CMswu6Mp
+# Fill in:
+#   VITE_MXE_PROGRAM_ID=<from `solana address -k mxe/poi_mxe/target/deploy/poi_mxe_scaffold-keypair.json`>
+#   VITE_REQUESTER_TOKEN_ACCOUNT=<from step 3>
+#   VITE_PROTOCOL_FEE_VAULT=<from step 3>
 npm install
 npm run dev
 ```
 
-The app runs on `http://localhost:5173` by default.
+The app runs at `http://localhost:5173`. The production build (`npm run build`) is what the included `Dockerfile` + `fly.toml` ship.
 
 ## Environment variables
 
-Copy `app/.env.example` to `app/.env` and configure:
+`app/.env` (Vite — substituted at build time, **not** at runtime):
 
 | Variable | Required | Description |
 |---|---|---|
-| `VITE_SOLANA_CLUSTER` | Yes | `devnet`, `testnet`, or `mainnet-beta` |
-| `VITE_SOLANA_RPC_URL` | No | Explicit RPC endpoint (overrides cluster default) |
-| `VITE_MXE_PROGRAM_ID` | Yes | MXE scaffold program ID (`5D8rVRC34GVskVdYVAHnkBwrxCdTKhT4TpJ5CMswu6Mp` on devnet) |
-| `VITE_REQUESTER_TOKEN_ACCOUNT` | Yes | From `devnet-setup.js` output |
-| `VITE_PROTOCOL_FEE_VAULT` | Yes | From `devnet-setup.js` output |
+| `VITE_SOLANA_CLUSTER`        | Yes | `devnet`, `testnet`, or `mainnet-beta` |
+| `VITE_SOLANA_RPC_URL`        | No  | Explicit RPC endpoint (overrides cluster default) |
+| `VITE_MXE_PROGRAM_ID`        | Yes | Address of the deployed MXE scaffold program |
+| `VITE_ARCIUM_CLUSTER_OFFSET` | No  | Override the auto-picked Arcium cluster offset |
+| `VITE_REQUESTER_TOKEN_ACCOUNT` | Yes | SPL token account that pays the verification fee |
+| `VITE_PROTOCOL_FEE_VAULT`    | Yes | SPL token account that receives the verification fee |
 
-Root `.env.example` has additional variables for scripts (RPC_URL, cluster offsets).
+Root `.env` (used by build scripts and `cargo` builds):
 
-## On-chain flow (instructions)
-
-| Instruction | Who calls it | What it does |
+| Variable | When | Description |
 |---|---|---|
-| `register_model` | Model owner | Commits weight hash to PDA, stores MXE config |
-| `update_model` | Model owner | Updates an existing model registration |
-| `request_inference` | Any user | Creates `VerifiedInference` PDA, pays SPL token fee, stores encrypted input hash |
-| `callback_verified_inference` | Arcium callback authority only | Writes output data, cluster info, node count, sets status to `Verified` |
-| `fail_inference` | Arcium callback authority only | Marks inference as `Failed` |
-| `check_verification` | Any program (CPI) | Returns structured verification result |
+| `POI_ARCIUM_CALLBACK_AUTHORITY` | Before `anchor build` | Override the test-only off-chain callback signer |
+| `POI_MXE_SIGN_PDA`              | Before `anchor build` | Override the production MXE callback signer PDA |
+
+## On-chain instructions
+
+| Instruction | Caller | What it does |
+|---|---|---|
+| `register_model`             | Model owner             | Commits weight hash to PDA, stores MXE config |
+| `update_model`               | Model owner             | Toggles active / updates MXE config / version |
+| `request_inference`          | Anyone                  | Creates Pending `VerifiedInference` PDA, charges SPL fee |
+| `callback_verified_inference`| MXE PDA or test signer | Writes 64-byte output, cluster, node_count → `Verified` |
+| `fail_inference`             | MXE PDA or test signer | Marks Pending inference as `Failed` |
+| `check_verification`         | Any program (CPI)       | Returns `VerificationResult { verified, model, model_commitment, node_count, timestamp, cluster }` |
+
+`poi_consumer::gated_action` is the worked CPI example. It calls `check_verification`, reads `get_return_data()`, then asserts `verified && node_count >= min && model_commitment == expected` before writing a `GatedActionLog` PDA.
 
 ## Tech stack
 
-- **Anchor** 1.0.0 (main program) / 0.32.1 (MXE scaffold)
-- **Arcium SDK** 0.9.7 (`arcis` circuit compiler, `arcium-anchor`, `@arcium-hq/client`)
-- **Solana CLI / Agave**
-- **React 18**, Vite 5, Tailwind CSS 3
-- **Solana Wallet Adapter** (Phantom, Solflare)
+- **Anchor** 1.0 (main + consumer) and 0.32 (MXE scaffold).
+- **Arcium** 0.9.7 — `arcis` circuit compiler, `arcium-anchor`, `@arcium-hq/client`, `arcium-rescue`.
+- **Solana** Agave / Solana CLI.
+- **React** 18, Vite 5, Tailwind 3, Solana Wallet Adapter (Phantom, Solflare).
 
 ## Production notes
 
-The test suite uses a local keypair (`tests/fixtures/arcium_callback_authority.json`) as the callback authority. Before production deployment, replace `ARCIUM_CALLBACK_AUTHORITY` in `programs/proof-of-inference/src/lib.rs` with Arcium's actual callback authority pubkey. Do not reuse the test keypair.
+- The MXE callback finalizes every inference end-to-end via `invoke_signed`. There is no off-chain relayer in the production path.
+- `tests/fixtures/arcium_callback_authority.json` is checked in for **integration tests only**. The corresponding pubkey is compiled into `ARCIUM_CALLBACK_AUTHORITY` (in `build.rs`) so tests can simulate the callback locally — production deployments may either keep this branch (it is gated by `is_authorized_callback_signer`) or override `POI_ARCIUM_CALLBACK_AUTHORITY` to a multisig pubkey for ops rescue.
+- `node_count` written to the `VerifiedInference` PDA is the actual `cluster_account.nodes.len()` at callback time, capped to `u8::MAX`. Consumers should still enforce a `min_node_count` (`poi_consumer` does) to defend against single-node attestations.
 
 ## Links
 

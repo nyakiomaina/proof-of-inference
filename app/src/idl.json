@@ -1,5 +1,5 @@
 {
-  "address": "CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh",
+  "address": "5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh",
   "metadata": {
     "name": "proof_of_inference",
     "version": "0.1.0",
@@ -37,7 +37,14 @@
         {
           "name": "arcium_authority",
           "docs": [
-            "The Arcium callback authority. Only this signer can finalize inferences."
+            "The callback signer. Accepts either:",
+            "- `MXE_CALLBACK_AUTHORITY` — deterministic PDA owned by the Arcium MXE",
+            "program (`find_program_address([b\"ArciumSignerAccount\"], MXE_PROGRAM_ID)`),",
+            "which the MXE callback signs with via `invoke_signed`. **This is the",
+            "production path** — every real inference is finalized through it.",
+            "- `ARCIUM_CALLBACK_AUTHORITY` — test-only off-chain key compiled in via",
+            "`build.rs`, used exclusively by the integration tests so they can",
+            "simulate a callback without spinning up an MPC cluster."
           ],
           "signer": true
         }
@@ -216,8 +223,8 @@
         "is encrypted client-side before submission; only the encrypted blob and",
         "a nonce are sent on-chain. A verification fee is transferred to the",
         "protocol vault. The instruction creates a Pending VerifiedInference PDA",
-        "and emits an event that off-chain relayers / Arcium watchers use to",
-        "trigger the MPC computation."
+        "that the Arcium MXE callback will later flip to Verified via CPI into",
+        "`callback_verified_inference`."
       ],
       "discriminator": [
         92,

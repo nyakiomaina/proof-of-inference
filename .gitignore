@@ -1,8 +1,17 @@
 # Dependencies
 node_modules/
 
-# Rust / Anchor / Solana
-target/
+# Rust / Anchor / Solana — ignore target/ contents but keep program keypairs
+# tracked so `anchor deploy` reproduces the same program IDs across machines.
+# These exceptions intentionally expose the upgrade authority — DO NOT use
+# these keys for mainnet. Mainnet should regenerate keypairs and use a
+# multisig (Squads) as the upgrade authority.
+target
+!target/
+target/*
+!target/deploy/
+target/deploy/*
+!target/deploy/*-keypair.json
 **/*.rs.bk
 .anchor/
 

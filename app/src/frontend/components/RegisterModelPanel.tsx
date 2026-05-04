@@ -4,6 +4,12 @@ import { SystemProgram, PublicKey } from "@solana/web3.js";
 import type { RegisteredModel } from "../hooks/useDemoState";
 import { ConnectWalletGate } from "./ConnectWalletGate";
 import { useProgram, findModelPda } from "../hooks/useProgram";
+import {
+  DEFAULT_WEIGHTS,
+  commitmentForWeights,
+  saveWeights,
+  type ModelWeights,
+} from "../lib/modelWeights";
 
 const MODEL_TYPES = [
   "SentimentClassifier",
@@ -21,20 +27,8 @@ const MODEL_TYPE_VARIANTS: Record<string, object> = {
   CustomClassifier: { customClassifier: {} },
 };
 
-async function sha256Bytes(input: string): Promise<Uint8Array> {
-  const encoded = new TextEncoder().encode(input);
-  const buf = await crypto.subtle.digest("SHA-256", encoded.buffer as ArrayBuffer);
-  return new Uint8Array(buf);
-}
-
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function randomBytes32(): Uint8Array {
-  const arr = new Uint8Array(32);
-  crypto.getRandomValues(arr);
-  return arr;
 }
 
 interface Props {
@@ -49,11 +43,21 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
   const [modelName, setModelName] = useState("");
   const [modelVersion, setModelVersion] = useState(1);
   const [modelType, setModelType] = useState<string>(MODEL_TYPES[0]);
-  const [weightInput, setWeightInput] = useState("");
+  const [weights, setWeights] = useState<ModelWeights>(DEFAULT_WEIGHTS);
   const [result, setResult] = useState<RegisteredModel | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const canSubmit = Boolean(publicKey) && Boolean(program) && modelName.trim().length > 0 && !loading;
+
+  function setWeight(key: keyof ModelWeights, raw: string) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isNaN(n)) {
+      setWeights((prev) => ({ ...prev, [key]: 0 }));
+      return;
+    }
+    const clamped = Math.max(0, Math.min(255, n));
+    setWeights((prev) => ({ ...prev, [key]: clamped }));
+  }
 
   async function handleRegister() {
     if (!publicKey || !program) return;
@@ -62,19 +66,19 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
     setError(null);
 
     try {
-      const commitment = weightInput.trim()
-        ? await sha256Bytes(weightInput.trim())
-        : randomBytes32();
+      const commitment = await commitmentForWeights(weights);
 
       const [modelPda] = findModelPda(publicKey, commitment);
+      const modelPdaStr = modelPda.toBase58();
 
       const existing = await (program.account as any).modelRegistry
         .fetchNullable(modelPda)
         .catch(() => null);
 
       if (existing) {
+        saveWeights(modelPdaStr, weights);
         const model: RegisteredModel = {
-          pda: modelPda.toBase58(),
+          pda: modelPdaStr,
           owner: publicKey.toBase58(),
           name: existing.modelName as string,
           version: Number(existing.modelVersion),
@@ -86,7 +90,9 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
         };
         onRegister(model);
         setResult(model);
-        setError("Model already registered on-chain — loaded existing PDA.");
+        setError(
+          "Model with these weights is already registered — loaded existing PDA. Change any weight to register a fresh one."
+        );
         return;
       }
 
@@ -108,8 +114,10 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
         } as any)
         .rpc();
 
+      saveWeights(modelPdaStr, weights);
+
       const model: RegisteredModel = {
-        pda: modelPda.toBase58(),
+        pda: modelPdaStr,
         owner: publicKey.toBase58(),
         name: modelName.trim(),
         version: modelVersion,
@@ -127,7 +135,7 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
       const msg = err?.message ?? String(err);
       if (msg.includes("already in use")) {
         setError(
-          "That model PDA is already allocated on-chain. Change the Weight commitment input to register a new model, or use the existing one in the Run inference panel."
+          "That model PDA is already allocated on-chain. Change a weight to register a new model, or pick the existing one in the Run inference panel."
         );
       } else {
         setError(msg);
@@ -180,13 +188,35 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
           </div>
 
           <div>
-            <label className="label">Weight commitment</label>
-            <input
-              className="input font-mono text-xs"
-              placeholder="Paste weights text to SHA-256, or leave blank for random"
-              value={weightInput}
-              onChange={(e) => setWeightInput(e.target.value)}
-            />
+            <label className="label">
+              Model weights{" "}
+              <span className="text-gray-600 font-normal">
+                (u8 — fed into the MPC circuit)
+              </span>
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {(["w0", "w1", "bias", "threshold"] as const).map((k) => (
+                <div key={k}>
+                  <input
+                    className="input font-mono text-xs text-center"
+                    type="number"
+                    min={0}
+                    max={255}
+                    value={weights[k]}
+                    onChange={(e) => setWeight(k, e.target.value)}
+                    aria-label={k}
+                  />
+                  <div className="text-[10px] text-gray-600 text-center mt-1 font-mono">
+                    {k}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-gray-600 mt-2 leading-relaxed">
+              Commitment is{" "}
+              <code className="font-mono">SHA-256("poi-weights-v1" || w0 || w1 || bias || threshold)</code>.
+              Anyone with the four weights can re-derive and verify the on-chain hash.
+            </p>
           </div>
 
           <button

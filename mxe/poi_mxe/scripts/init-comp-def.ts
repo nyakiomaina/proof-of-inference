@@ -1,5 +1,5 @@
 /**
- * Initializes the run_inference computation definition and uploads the circuit.
+ * Initializes the run_inference_v2 computation definition and uploads the circuit.
  *
  * Circuit upload sends **many** transactions. The public RPC
  * (`https://api.devnet.solana.com`) will return **429 Too Many Requests** and the
@@ -56,7 +56,7 @@ const idl = JSON.parse(fs.readFileSync(idlPath, "utf8"));
 const program = new Program(idl, provider);
 
 async function main() {
-  console.log("\n=== Init run_inference Computation Definition ===\n");
+  console.log("\n=== Init run_inference_v2 Computation Definition ===\n");
   console.log("Program ID:", program.programId.toBase58());
   console.log("Wallet:", owner.publicKey.toBase58());
 
@@ -64,7 +64,7 @@ async function main() {
 
   // Derive comp def PDA
   const baseSeed = getArciumAccountBaseSeed("ComputationDefinitionAccount");
-  const offset = getCompDefAccOffset("run_inference");
+  const offset = getCompDefAccOffset("run_inference_v2");
   const compDefPDA = PublicKey.findProgramAddressSync(
     [baseSeed, program.programId.toBuffer(), offset],
     getArciumProgramId(),
@@ -83,7 +83,7 @@ async function main() {
   } else {
     console.log("\n[1/2] Initializing computation definition...");
     const sig = await program.methods
-      .initRunInferenceCompDef()
+      .initRunInferenceV2CompDef()
       .accounts({
         compDefAccount: compDefPDA,
         payer: owner.publicKey,
@@ -102,8 +102,8 @@ async function main() {
         "   Prefer ANCHOR_PROVIDER_URL with a provider that allows higher throughput.\n"
     );
   }
-  console.log("\n[2/2] Uploading run_inference circuit...");
-  const circuitPath = path.join(projectRoot, "build", "run_inference.arcis");
+  console.log("\n[2/2] Uploading run_inference_v2 circuit...");
+  const circuitPath = path.join(projectRoot, "build", "run_inference_v2.arcis");
   const rawCircuit = fs.readFileSync(circuitPath);
   const uploadChunkSize = Math.max(
     1,
@@ -112,7 +112,7 @@ async function main() {
   console.log(`  Parallel txs per batch (chunkSize): ${uploadChunkSize}`);
   await uploadCircuit(
     provider,
-    "run_inference",
+    "run_inference_v2",
     program.programId,
     rawCircuit,
     true,

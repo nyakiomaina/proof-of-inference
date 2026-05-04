@@ -10,6 +10,7 @@ import type {
 import { ConnectWalletGate } from "./ConnectWalletGate";
 import { useProgram, findInferencePda } from "../hooks/useProgram";
 import { createMxeRescueCipher, RescueCipher } from "../lib/arciumInference";
+import { DEFAULT_WEIGHTS, loadWeights } from "../lib/modelWeights";
 import mxeIdlJson from "../../mxe_idl.json";
 import {
   getCompDefAccOffset,
@@ -24,6 +25,43 @@ import {
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Squeezes whatever shape an error comes back as (Anchor `SendTransactionError`,
+ * a plain Error, a wallet-adapter rejection object, a stringified RPC payload)
+ * down to a single human-readable string. Stops `[object Object]` from ever
+ * making it to the UI.
+ */
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    const anchorLogs =
+      typeof (err as any).getLogs === "function"
+        ? (() => {
+            try {
+              const logs = (err as any).getLogs();
+              return Array.isArray(logs) ? logs.join("\n") : "";
+            } catch {
+              return "";
+            }
+          })()
+        : Array.isArray((err as any).logs)
+          ? (err as any).logs.join("\n")
+          : "";
+    return anchorLogs ? `${err.message}\n\n${anchorLogs}` : err.message;
+  }
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    if (typeof obj.message === "string") return obj.message;
+    if (Array.isArray(obj.logs)) return obj.logs.join("\n");
+    try {
+      return JSON.stringify(obj, null, 2);
+    } catch {
+      return String(obj);
+    }
+  }
+  return String(err);
 }
 
 interface Props {
@@ -85,7 +123,8 @@ export function RunInferencePanel({
     model &&
     inputText.trim().length > 0 &&
     phase === "idle" &&
-    !loading;
+    !loading &&
+    MXE_IDL_AVAILABLE;
 
   const mxeProgramId = import.meta.env.VITE_MXE_PROGRAM_ID;
   const requesterTokenAddr = import.meta.env.VITE_REQUESTER_TOKEN_ACCOUNT;
@@ -114,52 +153,88 @@ export function RunInferencePanel({
       );
       const hashArr = new Uint8Array(hashBuf);
 
-      // Model weights (u8) for the demo classifier — match encrypted-ixs/src/lib.rs.
-      const w0 = BigInt(3);
-      const w1 = BigInt(2);
-      const bias = BigInt(10);
-      const threshold = BigInt(50);
+      // Model weights (u8) — pulled from the same canonical tuple that produced
+      // `weight_commitment` at registration time. Falls back to defaults for
+      // models registered before the weight-binding flow existed.
+      const stored = loadWeights(model.pda) ?? DEFAULT_WEIGHTS;
+      const w0 = BigInt(stored.w0);
+      const w1 = BigInt(stored.w1);
+      const bias = BigInt(stored.bias);
+      const threshold = BigInt(stored.threshold);
       const f0 = BigInt(hashArr[0]);
       const f1 = BigInt(hashArr[1]);
       const plaintext = [w0, w1, bias, threshold, f0, f1];
 
-      // Attempt real encryption when an MXE is configured. If the MXE public
-      // key cannot be fetched (program not deployed / cluster mismatch), fall
-      // back to plaintext-hash tracking so the main program flow still works.
-      let ciphertexts: number[][] | null = null;
-      let ephemeralPublicKey: Uint8Array | null = null;
-      let ephemeralSecret: Uint8Array | null = null;
-      let encryptionNonce: Uint8Array | null = null;
-      let cipher: RescueCipher | null = null;
-      let encryptedInputBytes: Uint8Array = textBytes;
-
-      if (mxeProgramId && MXE_IDL_AVAILABLE) {
-        try {
-          const mxePubkey = new PublicKey(mxeProgramId);
-          const enc = await createMxeRescueCipher(provider, mxePubkey);
-          cipher = enc.cipher;
-          ephemeralPublicKey = enc.ephemeralPublicKey;
-          ephemeralSecret = enc.ephemeralSecret;
-          encryptionNonce = enc.nonce;
-          ciphertexts = cipher.encrypt(plaintext, encryptionNonce);
-          // Flatten all ciphertexts + ephemeral pubkey + nonce into a single
-          // byte blob. `encrypted_input` in request_inference stores this.
-          const ctBytes = ciphertexts.reduce<number[]>(
-            (acc, ct) => acc.concat(ct),
-            []
-          );
-          encryptedInputBytes = new Uint8Array([
-            ...ctBytes,
-            ...Array.from(ephemeralPublicKey),
-            ...Array.from(encryptionNonce),
-          ]);
-        } catch (encErr: any) {
-          console.warn(
-            "Arcium encryption unavailable; submitting plaintext-hash for tracking:",
-            encErr?.message ?? encErr
-          );
-        }
+      // The Arcium MPC pipeline is the only path. If we can't encrypt or queue
+      // a real MPC computation we fail here — submitting an inference that
+      // would never be finalized by MPC pollutes the on-chain story.
+      if (!mxeProgramId) {
+        throw new Error(
+          "VITE_MXE_PROGRAM_ID is not set. The frontend cannot queue an Arcium MPC computation without it."
+        );
       }
+      if (!MXE_IDL_AVAILABLE) {
+        throw new Error(
+          "MXE IDL not synced. Run `arcium build` in mxe/poi_mxe/ then `npm run sync-idl` from the repo root."
+        );
+      }
+
+      let mxePubkey: PublicKey;
+      try {
+        mxePubkey = new PublicKey(mxeProgramId);
+      } catch {
+        throw new Error(
+          `VITE_MXE_PROGRAM_ID is not a valid base58 pubkey: ${mxeProgramId}`
+        );
+      }
+
+      // Preflight: confirm the MXE program account exists on the configured
+      // cluster *and* is owned by the BPF loader. Without this we'd let the
+      // wallet pop a "Simulation failed" with no useful detail.
+      const mxeAccountInfo = await connection.getAccountInfo(mxePubkey);
+      if (!mxeAccountInfo) {
+        throw new Error(
+          `MXE program ${mxeProgramId} does not exist on ${
+            import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet"
+          }. Deploy it (\`anchor deploy\` in mxe/poi_mxe/) and run \`arcium deploy\` to initialise it before running an inference.`
+        );
+      }
+      if (!mxeAccountInfo.executable) {
+        throw new Error(
+          `Account ${mxeProgramId} exists but is not an executable program. Check VITE_MXE_PROGRAM_ID.`
+        );
+      }
+
+      let cipher: RescueCipher;
+      let ephemeralPublicKey: Uint8Array;
+      let encryptionNonce: Uint8Array;
+      let ciphertexts: number[][];
+      try {
+        const enc = await createMxeRescueCipher(provider, mxePubkey);
+        cipher = enc.cipher;
+        ephemeralPublicKey = enc.ephemeralPublicKey;
+        encryptionNonce = enc.nonce;
+        ciphertexts = cipher.encrypt(plaintext, encryptionNonce);
+      } catch (encErr: unknown) {
+        throw new Error(
+          `Arcium x25519 / Rescue encryption failed: ${formatError(
+            encErr
+          )}. Make sure the MXE has been initialised with \`arcium deploy\` so its MXEAccount + cluster bindings exist.`
+        );
+      }
+
+      // `encrypted_input` on `request_inference` stores the flattened
+      // ciphertexts + ephemeral pubkey + nonce so the input is reproducible
+      // off-chain by anyone with the cipher state.
+      const ctBytes = ciphertexts.reduce<number[]>(
+        (acc, ct) => acc.concat(ct),
+        []
+      );
+      const encryptedInputBytes = new Uint8Array([
+        ...ctBytes,
+        ...Array.from(ephemeralPublicKey),
+        ...Array.from(encryptionNonce),
+      ]);
 
       // Phase 2: Submit on-chain
       setPhase("submitting");
@@ -200,57 +275,60 @@ export function RunInferencePanel({
         status: "Pending",
         requester: publicKey.toBase58(),
         tx,
+        route: "Unknown",
       };
       onInferenceCreated(inference);
       setCurrentInference(inference);
 
-      // Queue MXE computation if the IDL and ciphertexts are both available.
-      if (
-        MXE_IDL_AVAILABLE &&
-        ciphertexts &&
-        ephemeralPublicKey &&
-        encryptionNonce &&
-        mxeProgramId
-      ) {
-        try {
-          const mxePubkey = new PublicKey(mxeProgramId);
-          const mxeProgram = new Program(mxeIdlJson as unknown as Idl, provider);
-          const offsetBytes = crypto.getRandomValues(new Uint8Array(8));
-          const computationOffset = new BN(Array.from(offsetBytes), "le");
+      // Queue the Arcium MPC computation. The MXE callback will CPI into
+      // `proof_of_inference::callback_verified_inference` once the cluster
+      // signs off, so this is the only way the PDA above ever flips to
+      // Verified. If queuing fails we surface it loudly — the inference
+      // would otherwise remain Pending forever.
+      try {
+        const mxeProgram = new Program(mxeIdlJson as unknown as Idl, provider);
+        const offsetBytes = crypto.getRandomValues(new Uint8Array(8));
+        const computationOffset = new BN(Array.from(offsetBytes), "le");
 
-          await mxeProgram.methods
-            .runInference(
-              computationOffset,
-              ciphertexts.map((ct) => Array.from(ct)),
-              Array.from(ephemeralPublicKey),
-              new BN(deserializeLE(encryptionNonce).toString()),
-            )
-            .accountsPartial({
-              payer: publicKey,
-              computationAccount: getComputationAccAddress(
-                ARCIUM_CLUSTER_OFFSET,
-                computationOffset
-              ),
-              clusterAccount: getClusterAccAddress(ARCIUM_CLUSTER_OFFSET),
-              mxeAccount: getMXEAccAddress(mxePubkey),
-              mempoolAccount: getMempoolAccAddress(ARCIUM_CLUSTER_OFFSET),
-              executingPool: getExecutingPoolAccAddress(ARCIUM_CLUSTER_OFFSET),
-              compDefAccount: getCompDefAccAddress(
-                mxePubkey,
-                Buffer.from(getCompDefAccOffset("run_inference")).readUInt32LE()
-              ),
-            })
-            .rpc({ skipPreflight: true });
-        } catch (mxeErr: any) {
-          console.warn(
-            "MXE queue failed (falling back to relayer / devnet-callback):",
-            mxeErr?.message ?? mxeErr
-          );
-        }
+        await mxeProgram.methods
+          .runInferenceV2(
+            computationOffset,
+            ciphertexts.map((ct) => Array.from(ct)),
+            Array.from(ephemeralPublicKey),
+            new BN(deserializeLE(encryptionNonce).toString()),
+            // Forwarded to the MPC callback so it can CPI back into
+            // `proof_of_inference::callback_verified_inference` and finalize
+            // this `VerifiedInference` PDA in the same MPC trip.
+            program.programId,
+            inferencePda,
+            modelPda,
+          )
+          .accountsPartial({
+            payer: publicKey,
+            computationAccount: getComputationAccAddress(
+              ARCIUM_CLUSTER_OFFSET,
+              computationOffset
+            ),
+            clusterAccount: getClusterAccAddress(ARCIUM_CLUSTER_OFFSET),
+            mxeAccount: getMXEAccAddress(mxePubkey),
+            mempoolAccount: getMempoolAccAddress(ARCIUM_CLUSTER_OFFSET),
+            executingPool: getExecutingPoolAccAddress(ARCIUM_CLUSTER_OFFSET),
+            compDefAccount: getCompDefAccAddress(
+              mxePubkey,
+              Buffer.from(getCompDefAccOffset("run_inference_v2")).readUInt32LE()
+            ),
+          })
+          .rpc({ skipPreflight: true });
+      } catch (mxeErr: unknown) {
+        console.error("MXE runInference call failed:", mxeErr);
+        throw new Error(
+          `Arcium MXE queue failed: ${formatError(
+            mxeErr
+          )}\n\nThe on-chain inference request landed but the MPC computation could not be queued — it will remain Pending. Check that the MXE is fully initialised (MXEAccount, cluster, and run_inference_v2 comp def all present) on this cluster.`
+        );
       }
 
-      // Phase 3: Poll for callback (from MXE callback, or from the relayer /
-      // devnet-callback script that writes output_data on the main program).
+      // Phase 3: poll for the MXE callback to CPI-finalize this PDA.
       setPhase("polling");
       const verified = await pollForVerification(program, inferencePda, 90);
 
@@ -259,6 +337,11 @@ export function RunInferencePanel({
           inferencePda
         );
         const rawOutput = new Uint8Array(account.outputData as number[]);
+        if (rawOutput.length !== 64) {
+          throw new Error(
+            `Inference finalized with an unexpected payload size (${rawOutput.length} bytes, expected 64). This is not a real Arcium MPC output — refusing to display.`
+          );
+        }
         const decoded = decodeOutput(rawOutput, cipher, encryptionNonce);
         const updates: Partial<VerifiedInferenceRecord> = {
           outputHash: toHex(new Uint8Array(account.outputHash as number[])),
@@ -266,6 +349,7 @@ export function RunInferencePanel({
           nodeCount: account.nodeCount as number,
           cluster: (account.arciumCluster as PublicKey).toBase58(),
           status: "Verified",
+          route: "MPC",
         };
         onInferenceVerified(inferencePda.toBase58(), updates);
         onModelIncrement(model.pda);
@@ -274,9 +358,9 @@ export function RunInferencePanel({
       } else {
         setPhase("done");
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Inference failed:", err);
-      setError(err.message ?? String(err));
+      setError(formatError(err));
       setPhase("idle");
     } finally {
       setLoading(false);
@@ -349,11 +433,11 @@ export function RunInferencePanel({
             )}
 
             {!MXE_IDL_AVAILABLE && phase === "idle" && (
-              <div className="p-2.5 bg-yellow-500/5 border border-yellow-500/20 rounded-md text-[11px] text-yellow-400/80">
-                MXE IDL not synced. Inference will track on-chain but real MPC
-                queueing is skipped. Build with <code>arcium build</code> and
-                run <code>npm run sync-idl</code>, or start the relayer
-                (<code>npm run listen:inference</code>) for auto-finalization.
+              <div className="p-2.5 bg-red-500/5 border border-red-500/20 rounded-md text-[11px] text-red-400/80">
+                <strong>MXE IDL not synced.</strong> Inference is disabled until
+                the Arcium MPC pipeline is ready. Build with{" "}
+                <code>arcium build</code> in <code>mxe/poi_mxe/</code> and run{" "}
+                <code>npm run sync-idl</code> from the repo root.
               </div>
             )}
 
@@ -379,15 +463,13 @@ export function RunInferencePanel({
             {currentInference?.status === "Pending" && phase === "done" && (
               <div className="p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-md text-xs text-gray-400">
                 <span className="badge-pending mb-2 inline-block">Pending</span>
-                <p>Inference submitted. Waiting for Arcium MPC callback.</p>
-                <p className="mt-1">Start the relayer to auto-finalize:</p>
-                <code className="block mt-2 text-gray-600 bg-gray-950 p-2 rounded text-[11px]">
-                  npm run listen:inference
-                </code>
-                <p className="mt-2">Or run a single manual callback:</p>
-                <code className="block mt-1 text-gray-600 bg-gray-950 p-2 rounded text-[11px]">
-                  node scripts/devnet-callback.js {currentInference.pda}
-                </code>
+                <p>
+                  Inference request landed on-chain but the MPC callback hasn't
+                  arrived within the timeout. Re-queue from the MXE explorer or
+                  retry — once the MXE callback CPIs into{" "}
+                  <code>callback_verified_inference</code>, this PDA flips to
+                  Verified automatically.
+                </p>
               </div>
             )}
           </div>
@@ -414,13 +496,19 @@ async function pollForVerification(
 }
 
 /**
- * Normalizes the raw on-chain `output_data` bytes into a JSON string that the
- * rest of the UI understands. Three wire formats are handled:
+ * Decodes the on-chain `output_data` bytes the MXE callback CPIs in.
  *
- *   1. Arcium MPC ciphertext blob: exactly 64 bytes (classification_ct[32] +
- *      score_ct[32]). Decrypted in place if we still hold the cipher + nonce.
- *   2. Plain JSON string (what scripts/devnet-callback.js writes).
- *   3. Arbitrary bytes (fallback — stringified hex so nothing is lost).
+ * The production wire format is exactly 64 bytes:
+ *   classification_ct[32] || score_ct[32]
+ * Both ciphertexts are produced by the Arcium MPC nodes using the per-request
+ * Rescue cipher. If we still hold the matching `cipher` + `nonce` (true for
+ * inferences started in the current session), decrypt and surface the plaintext
+ * label/score. Otherwise we keep the raw bytes around as hex so downstream
+ * verification (output_hash matches what's on-chain) still works.
+ *
+ * Historical pre-MPC-CPI records can carry arbitrary bytes (e.g. a previous
+ * relayer wrote JSON). We surface those as UTF-8/JSON when valid, otherwise
+ * hex — never silently drop them.
  */
 function decodeOutput(
   raw: Uint8Array,
@@ -437,11 +525,11 @@ function decodeOutput(
       const classification = Number(values[0]);
       const score = Number(values[1]);
       const label = labelFor(classification);
-      // score is a u16 in the circuit; derive confidence from threshold 50
+      // `score` is a u16 from the circuit; clamp to [0, 1] for display.
       const confidence = Math.max(0, Math.min(1, score / 100));
       return JSON.stringify({ classification, label, score, confidence });
     } catch (e) {
-      console.warn("MPC ciphertext decryption failed; falling back.", e);
+      console.warn("MPC ciphertext decryption failed; preserving raw hex.", e);
     }
   }
 

@@ -1,11 +1,16 @@
 # Proof of Inference — Arcium MXE scaffold
 
-This folder is a standard **`arcium init`** project (Hello World: `add_together`) checked into the
+This folder is a standard **`arcium init`** project checked into the
 **proof-of-inference** repo so you can run **`arcium build`**, **`arcium test`**, and
 **`arcium deploy`** without conflicting with the root **Anchor 1.0** program (`programs/proof-of-inference`).
 
-- **Inference Arcis circuit (logistic / 128-d):** `../../confidential/` (`cargo build -p proof-of-inference-circuit --features arcis`).
-- **Next merge step:** port that circuit into `encrypted-ixs/` and add matching `queue_computation` / callback instructions here (or CPI from this MXE to `proof_of_inference`).
+- **Deployed circuit:** [`encrypted-ixs/src/lib.rs`](encrypted-ixs/src/lib.rs) — minimal
+  linear classifier over 6 `u8` inputs (`w0, w1, bias, threshold, f0, f1`).
+- **MXE program:** [`programs/poi_mxe_scaffold/src/lib.rs`](programs/poi_mxe_scaffold/src/lib.rs) —
+  exposes `run_inference` + an Arcium callback that, on success, **CPIs into**
+  [`proof_of_inference::callback_verified_inference`](../../programs/proof-of-inference/src/lib.rs)
+  with the 64-byte ciphertext payload, finalizing the on-chain attestation in a
+  single MPC trip.
 
 ---
 

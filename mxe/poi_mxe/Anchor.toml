@@ -1,13 +1,16 @@
 [toolchain]
-package_manager = "yarn"
 anchor_version = "0.32.1"
+package_manager = "yarn"
 
 [features]
 resolution = true
 skip-lint = false
 
 [programs.localnet]
-poi_mxe_scaffold = "5D8rVRC34GVskVdYVAHnkBwrxCdTKhT4TpJ5CMswu6Mp"
+poi_mxe_scaffold = "EFZ1VFf9ws338N9YktYuVQXB8ascEhQ3agtRvVE2rzKF"
+
+[registry]
+url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
@@ -15,5 +18,3 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "cargo test"
-
-[hooks]

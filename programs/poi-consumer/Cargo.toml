@@ -1,0 +1,22 @@
+[package]
+name = "poi-consumer"
+version = "0.1.0"
+description = "Demo consumer of proof-of-inference: gates an action on a verified MPC inference"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "poi_consumer"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build", "proof-of-inference/idl-build"]
+
+[dependencies]
+anchor-lang = { workspace = true }
+# CPI into the proof-of-inference program.
+proof-of-inference = { path = "../proof-of-inference", features = ["cpi"] }

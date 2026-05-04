@@ -1,10 +1,15 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
-use solana_pubkey::pubkey;
 use solana_sha256_hasher::hash as sha256_hash;
 
 // Synced with `target/deploy/proof_of_inference-keypair.json`.
-declare_id!("CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh");
+declare_id!("5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh");
+
+// Callback signer pubkey — generated from `POI_ARCIUM_CALLBACK_AUTHORITY` (see `build.rs`).
+include!(concat!(
+    env!("OUT_DIR"),
+    "/arcium_callback_authority_pubkey.rs"
+));
 
 /// Verification fee per inference request (in token smallest units).
 /// For USDC with 6 decimals: 50_000 = $0.05
@@ -93,8 +98,8 @@ pub mod proof_of_inference {
     /// is encrypted client-side before submission; only the encrypted blob and
     /// a nonce are sent on-chain. A verification fee is transferred to the
     /// protocol vault. The instruction creates a Pending VerifiedInference PDA
-    /// and emits an event that off-chain relayers / Arcium watchers use to
-    /// trigger the MPC computation.
+    /// that the Arcium MXE callback will later flip to Verified via CPI into
+    /// `callback_verified_inference`.
     pub fn request_inference(
         ctx: Context<RequestInference>,
         encrypted_input: Vec<u8>,
@@ -392,11 +397,18 @@ pub struct CallbackVerifiedInference<'info> {
         constraint = verified_inference.model == model_registry.key() @ ErrorCode::ModelMismatch
     )]
     pub model_registry: Account<'info, ModelRegistry>,
-    /// The Arcium callback authority. Only this signer can finalize inferences.
-    /// CHECK: Validated against the ARCIUM_CALLBACK_AUTHORITY constant.
+    /// The callback signer. Accepts either:
+    ///   - `MXE_CALLBACK_AUTHORITY` — deterministic PDA owned by the Arcium MXE
+    ///     program (`find_program_address([b"ArciumSignerAccount"], MXE_PROGRAM_ID)`),
+    ///     which the MXE callback signs with via `invoke_signed`. **This is the
+    ///     production path** — every real inference is finalized through it.
+    ///   - `ARCIUM_CALLBACK_AUTHORITY` — test-only off-chain key compiled in via
+    ///     `build.rs`, used exclusively by the integration tests so they can
+    ///     simulate a callback without spinning up an MPC cluster.
+    /// CHECK: signer + key match enforced by `is_authorized_callback_signer`.
     #[account(
         signer,
-        constraint = arcium_authority.key() == ARCIUM_CALLBACK_AUTHORITY @ ErrorCode::UnauthorizedCallback
+        constraint = is_authorized_callback_signer(&arcium_authority.key()) @ ErrorCode::UnauthorizedCallback
     )]
     pub arcium_authority: UncheckedAccount<'info>,
 }
@@ -405,12 +417,20 @@ pub struct CallbackVerifiedInference<'info> {
 pub struct FailInference<'info> {
     #[account(mut)]
     pub verified_inference: Account<'info, VerifiedInference>,
-    /// CHECK: Validated against the ARCIUM_CALLBACK_AUTHORITY constant.
+    /// CHECK: see `CallbackVerifiedInference::arcium_authority`.
     #[account(
         signer,
-        constraint = arcium_authority.key() == ARCIUM_CALLBACK_AUTHORITY @ ErrorCode::UnauthorizedCallback
+        constraint = is_authorized_callback_signer(&arcium_authority.key()) @ ErrorCode::UnauthorizedCallback
     )]
     pub arcium_authority: UncheckedAccount<'info>,
+}
+
+/// Returns true when `signer` matches one of the two compile-time callback
+/// authorities — the MXE program's signing PDA (production) or the test-only
+/// off-chain key (integration tests). See `build.rs` for source of truth.
+#[inline(always)]
+fn is_authorized_callback_signer(signer: &Pubkey) -> bool {
+    *signer == MXE_CALLBACK_AUTHORITY || *signer == ARCIUM_CALLBACK_AUTHORITY
 }
 
 #[derive(Accounts)]
@@ -489,17 +509,3 @@ pub enum ErrorCode {
     #[msg("Model registry does not match the inference record")]
     ModelMismatch,
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// The Arcium callback authority pubkey. For **local testing only**, this matches
-/// `tests/fixtures/arcium_callback_authority.json` so `anchor test` can sign callbacks
-/// without real MPC.
-///
-/// **Production:** Replace with the pubkey Arcium documents for your network *or*
-/// redesign around an MXE `#[arcium_callback]` (see `mxe/poi_mxe`) so verification
-/// follows Arcium’s standard flow. There is no env-var override — recompile after changing.
-const ARCIUM_CALLBACK_AUTHORITY: Pubkey =
-    pubkey!("frM1CnN1bvUDTHFSLCHQ7Mnb9PZp5u2fW7CLuWXscZM");

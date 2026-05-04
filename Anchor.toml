@@ -1,22 +1,30 @@
+[toolchain]
+
 [features]
-seeds = false
+resolution = true
 skip-lint = false
 
-[workspace]
-members = ["programs/proof-of-inference"]
+[programs.devnet]
+proof_of_inference = "5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh"
+poi_consumer = "EqDLfkt6ZVyTo1ga3KtkFpV93qZFZZqQfpkZgMoDFcaj"
 
 [programs.localnet]
-proof_of_inference = "CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh"
-
-[programs.devnet]
-proof_of_inference = "CCdibNmqNCG58v4fVjAKvwXora2ekGYToUTTQF6QVmuh"
+proof_of_inference = "5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh"
+poi_consumer = "EqDLfkt6ZVyTo1ga3KtkFpV93qZFZZqQfpkZgMoDFcaj"
 
 [provider]
-cluster = "Localnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
-[test]
-startup_wait = 30000
+[workspace]
+members = ["programs/proof-of-inference", "programs/poi-consumer"]
 
 [scripts]
 test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+[hooks]
+
+[test]
+startup_wait = 30000
+shutdown_wait = 2000
+upgradeable = false
