@@ -214,12 +214,6 @@ Root `.env` (used by build scripts and `cargo` builds):
 - **Solana** Agave / Solana CLI.
 - **React** 18, Vite 5, Tailwind 3, Solana Wallet Adapter (Phantom, Solflare).
 
-## Production notes
-
-- The MXE callback finalizes every inference end-to-end via `invoke_signed`. There is no off-chain relayer in the production path.
-- `tests/fixtures/arcium_callback_authority.json` is checked in for **integration tests only**. The corresponding pubkey is compiled into `ARCIUM_CALLBACK_AUTHORITY` (in `build.rs`) so tests can simulate the callback locally — production deployments may either keep this branch (it is gated by `is_authorized_callback_signer`) or override `POI_ARCIUM_CALLBACK_AUTHORITY` to a multisig pubkey for ops rescue.
-- `node_count` written to the `VerifiedInference` PDA is the actual `cluster_account.nodes.len()` at callback time, capped to `u8::MAX`. Consumers should still enforce a `min_node_count` (`poi_consumer` does) to defend against single-node attestations.
-
 ## Links
 
 - [Anchor](https://www.anchor-lang.com/)
