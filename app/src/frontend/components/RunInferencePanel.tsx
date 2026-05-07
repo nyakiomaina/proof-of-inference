@@ -11,6 +11,8 @@ import { ConnectWalletGate } from "./ConnectWalletGate";
 import { useProgram, findInferencePda } from "../hooks/useProgram";
 import { createMxeRescueCipher, RescueCipher } from "../lib/arciumInference";
 import { DEFAULT_WEIGHTS, loadWeights } from "../lib/modelWeights";
+import { formatInferenceOutputForRecord } from "../lib/mpcOutputDecrypt";
+import { persistInferenceDecryptSecrets } from "../lib/inferenceDecryptStorage";
 import mxeIdlJson from "../../mxe_idl.json";
 import {
   getCompDefAccOffset,
@@ -34,6 +36,7 @@ function toHex(bytes: Uint8Array): string {
  * making it to the UI.
  */
 function formatError(err: unknown): string {
+  let raw: string;
   if (err instanceof Error) {
     const anchorLogs =
       typeof (err as any).getLogs === "function"
@@ -48,20 +51,24 @@ function formatError(err: unknown): string {
         : Array.isArray((err as any).logs)
           ? (err as any).logs.join("\n")
           : "";
-    return anchorLogs ? `${err.message}\n\n${anchorLogs}` : err.message;
-  }
-  if (typeof err === "string") return err;
-  if (err && typeof err === "object") {
+    raw = anchorLogs ? `${err.message}\n\n${anchorLogs}` : err.message;
+  } else if (typeof err === "string") {
+    raw = err;
+  } else if (err && typeof err === "object") {
     const obj = err as Record<string, unknown>;
-    if (typeof obj.message === "string") return obj.message;
-    if (Array.isArray(obj.logs)) return obj.logs.join("\n");
-    try {
-      return JSON.stringify(obj, null, 2);
-    } catch {
-      return String(obj);
+    if (typeof obj.message === "string") raw = obj.message;
+    else if (Array.isArray(obj.logs)) raw = obj.logs.join("\n");
+    else {
+      try {
+        raw = JSON.stringify(obj, null, 2);
+      } catch {
+        raw = String(obj);
+      }
     }
+  } else {
+    raw = String(err);
   }
-  return String(err);
+  return raw;
 }
 
 interface Props {
@@ -137,6 +144,19 @@ export function RunInferencePanel({
     setCurrentInference(null);
 
     try {
+      /*
+       * End-to-end flow (each step depends on the last):
+       *
+       * 1) Encrypt plaintext features + weights tuple with Rescue using the MXE’s
+       *    on-chain x25519 key (`createMxeRescueCipher` → same MXE program as step 2b).
+       * 2a) `proof_of_inference::request_inference` — protocol fee + creates Pending `VerifiedInference`.
+       * 2b) MXE `run_inference_v2` — queues Arcium MPC (`accountsPartial` fills PDAs;
+       *    fixed pool/clock/arcium addrs come from IDL). On completion the MXE callback CPIs
+       *    `callback_verified_inference` so the PDA becomes Verified.
+       * 3) Poll chain until Verified or timeout.
+       *
+       * Anchor always sends transactions to `idl.address`; env MXE id MUST match `mxe_idl.json`.
+       */
       // Phase 1: Encrypt input via Arcium Rescue cipher (if MXE configured)
       setPhase("encrypting");
 
@@ -188,6 +208,13 @@ export function RunInferencePanel({
         );
       }
 
+      const idlMxeId = new PublicKey((mxeIdlJson as { address: string }).address);
+      if (!mxePubkey.equals(idlMxeId)) {
+        throw new Error(
+          `MXE program id mismatch: VITE_MXE_PROGRAM_ID is ${mxePubkey.toBase58()} but app/src/mxe_idl.json declares ${idlMxeId.toBase58()}. Anchor always invokes the IDL address — encryption/PDA helpers used your env id. Run \`npm run sync-idl\` after deploy or fix app/.env so they match.`
+        );
+      }
+
       // Preflight: confirm the MXE program account exists on the configured
       // cluster *and* is owned by the BPF loader. Without this we'd let the
       // wallet pop a "Simulation failed" with no useful detail.
@@ -206,12 +233,14 @@ export function RunInferencePanel({
       }
 
       let cipher: RescueCipher;
+      let ephemeralSecret: Uint8Array;
       let ephemeralPublicKey: Uint8Array;
       let encryptionNonce: Uint8Array;
       let ciphertexts: number[][];
       try {
         const enc = await createMxeRescueCipher(provider, mxePubkey);
         cipher = enc.cipher;
+        ephemeralSecret = enc.ephemeralSecret;
         ephemeralPublicKey = enc.ephemeralPublicKey;
         encryptionNonce = enc.nonce;
         ciphertexts = cipher.encrypt(plaintext, encryptionNonce);
@@ -236,7 +265,8 @@ export function RunInferencePanel({
         ...Array.from(encryptionNonce),
       ]);
 
-      // Phase 2: Submit on-chain
+      // Phase 2a — proof_of_inference::request_inference (consumer program).
+      // Creates the VerifiedInference PDA in Pending; does not touch Arcium MPC.
       setPhase("submitting");
 
       const modelPda = new PublicKey(model.pda);
@@ -250,17 +280,24 @@ export function RunInferencePanel({
         );
       }
 
-      const tx = await program.methods
-        .requestInference(Buffer.from(encryptedInputBytes), Array.from(inferenceNonce))
-        .accounts({
-          modelRegistry: modelPda,
-          verifiedInference: inferencePda,
-          requester: publicKey,
-          requesterToken: new PublicKey(requesterTokenAddr),
-          protocolFeeVault: new PublicKey(feeVaultAddr),
-          tokenProgram: TOKEN_PROGRAM_ID,
-        } as any)
-        .rpc();
+      let requestInferenceSig: string;
+      try {
+        requestInferenceSig = await program.methods
+          .requestInference(Buffer.from(encryptedInputBytes), Array.from(inferenceNonce))
+          .accounts({
+            modelRegistry: modelPda,
+            verifiedInference: inferencePda,
+            requester: publicKey,
+            requesterToken: new PublicKey(requesterTokenAddr),
+            protocolFeeVault: new PublicKey(feeVaultAddr),
+            tokenProgram: TOKEN_PROGRAM_ID,
+          } as any)
+          .rpc();
+      } catch (reqErr: unknown) {
+        throw new Error(
+          `proof_of_inference request_inference failed (nothing queued on Arcium yet):\n${formatError(reqErr)}`
+        );
+      }
 
       const inference: VerifiedInferenceRecord = {
         pda: inferencePda.toBase58(),
@@ -274,17 +311,14 @@ export function RunInferencePanel({
         timestamp: Math.floor(Date.now() / 1000),
         status: "Pending",
         requester: publicKey.toBase58(),
-        tx,
+        tx: requestInferenceSig,
         route: "Unknown",
       };
       onInferenceCreated(inference);
       setCurrentInference(inference);
 
-      // Queue the Arcium MPC computation. The MXE callback will CPI into
-      // `proof_of_inference::callback_verified_inference` once the cluster
-      // signs off, so this is the only way the PDA above ever flips to
-      // Verified. If queuing fails we surface it loudly — the inference
-      // would otherwise remain Pending forever.
+      // Phase 2b — MXE scaffold run_inference_v2 → Arcium core queues MPC.
+      // CPI callback later invokes proof_of_inference::callback_verified_inference.
       try {
         const mxeProgram = new Program(mxeIdlJson as unknown as Idl, provider);
         const offsetBytes = crypto.getRandomValues(new Uint8Array(8));
@@ -296,9 +330,6 @@ export function RunInferencePanel({
             ciphertexts.map((ct) => Array.from(ct)),
             Array.from(ephemeralPublicKey),
             new BN(deserializeLE(encryptionNonce).toString()),
-            // Forwarded to the MPC callback so it can CPI back into
-            // `proof_of_inference::callback_verified_inference` and finalize
-            // this `VerifiedInference` PDA in the same MPC trip.
             program.programId,
             inferencePda,
             modelPda,
@@ -318,13 +349,15 @@ export function RunInferencePanel({
               Buffer.from(getCompDefAccOffset("run_inference_v2")).readUInt32LE()
             ),
           })
-          .rpc({ skipPreflight: true });
+          .rpc();
       } catch (mxeErr: unknown) {
-        console.error("MXE runInference call failed:", mxeErr);
+        console.error("MXE run_inference_v2 failed:", mxeErr);
         throw new Error(
-          `Arcium MXE queue failed: ${formatError(
-            mxeErr
-          )}\n\nThe on-chain inference request landed but the MPC computation could not be queued — it will remain Pending. Check that the MXE is fully initialised (MXEAccount, cluster, and run_inference_v2 comp def all present) on this cluster.`
+          `MXE run_inference_v2 failed after request_inference confirmed.\n` +
+            `request_inference tx: ${requestInferenceSig}\n` +
+            `The VerifiedInference PDA stays Pending until MPC runs.\n\n` +
+            `${formatError(mxeErr)}\n\n` +
+            `Typical causes: computation definition not uploaded/finalized (Arcium custom 6300), wrong cluster offset, or stale env vs synced app/src/mxe_idl.json.`
         );
       }
 
@@ -337,12 +370,22 @@ export function RunInferencePanel({
           inferencePda
         );
         const rawOutput = new Uint8Array(account.outputData as number[]);
-        if (rawOutput.length !== 64) {
+        if (rawOutput.length !== 64 && rawOutput.length !== 80) {
           throw new Error(
-            `Inference finalized with an unexpected payload size (${rawOutput.length} bytes, expected 64). This is not a real Arcium MPC output — refusing to display.`
+            `Inference finalized with an unexpected payload size (${rawOutput.length} bytes, expected 64 legacy or 80 with MPC output nonce).`
           );
         }
-        const decoded = decodeOutput(rawOutput, cipher, encryptionNonce);
+        const decoded = formatInferenceOutputForRecord(
+          rawOutput,
+          cipher,
+          encryptionNonce
+        );
+        persistInferenceDecryptSecrets(
+          publicKey.toBase58(),
+          inferencePda.toBase58(),
+          ephemeralSecret,
+          encryptionNonce
+        );
         const updates: Partial<VerifiedInferenceRecord> = {
           outputHash: toHex(new Uint8Array(account.outputHash as number[])),
           outputData: decoded,
@@ -495,80 +538,14 @@ async function pollForVerification(
   return false;
 }
 
-/**
- * Decodes the on-chain `output_data` bytes the MXE callback CPIs in.
- *
- * The production wire format is exactly 64 bytes:
- *   classification_ct[32] || score_ct[32]
- * Both ciphertexts are produced by the Arcium MPC nodes using the per-request
- * Rescue cipher. If we still hold the matching `cipher` + `nonce` (true for
- * inferences started in the current session), decrypt and surface the plaintext
- * label/score. Otherwise we keep the raw bytes around as hex so downstream
- * verification (output_hash matches what's on-chain) still works.
- *
- * Historical pre-MPC-CPI records can carry arbitrary bytes (e.g. a previous
- * relayer wrote JSON). We surface those as UTF-8/JSON when valid, otherwise
- * hex — never silently drop them.
- */
-function decodeOutput(
-  raw: Uint8Array,
-  cipher: RescueCipher | null,
-  nonce: Uint8Array | null
-): string {
-  if (raw.length === 0) return "";
-
-  if (raw.length === 64 && cipher && nonce) {
-    try {
-      const classificationCt = Array.from(raw.slice(0, 32));
-      const scoreCt = Array.from(raw.slice(32, 64));
-      const values = cipher.decrypt([classificationCt, scoreCt], nonce);
-      const classification = Number(values[0]);
-      const score = Number(values[1]);
-      const label = labelFor(classification);
-      // `score` is a u16 from the circuit; clamp to [0, 1] for display.
-      const confidence = Math.max(0, Math.min(1, score / 100));
-      return JSON.stringify({ classification, label, score, confidence });
-    } catch (e) {
-      console.warn("MPC ciphertext decryption failed; preserving raw hex.", e);
-    }
-  }
-
-  try {
-    const asText = new TextDecoder("utf-8", { fatal: true }).decode(raw);
-    JSON.parse(asText);
-    return asText;
-  } catch {}
-
-  return JSON.stringify({
-    raw: Array.from(raw).map((b) => b.toString(16).padStart(2, "0")).join(""),
-  });
-}
-
-function labelFor(classification: number): string {
-  switch (classification) {
-    case 0:
-      return "Negative";
-    case 1:
-      return "Neutral";
-    case 2:
-      return "Positive";
-    default:
-      return "Unknown";
-  }
-}
-
 function summarizeOutput(outputData: string): string {
   if (!outputData) return "";
   try {
     const parsed = JSON.parse(outputData);
     if (parsed.label) {
-      if (typeof parsed.confidence === "number") {
-        return `${parsed.label} (${(parsed.confidence * 100).toFixed(1)}%)`;
-      }
-      if (typeof parsed.score === "number") {
-        return `${parsed.label} (score ${parsed.score})`;
-      }
-      return parsed.label;
+      return typeof parsed.score === "number"
+        ? `${parsed.label} (score ${parsed.score})`
+        : parsed.label;
     }
     return outputData;
   } catch {

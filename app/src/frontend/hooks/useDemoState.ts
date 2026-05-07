@@ -33,15 +33,16 @@ export interface VerifiedInferenceRecord {
 
 /**
  * Maps a raw `output_data` byte length to the path that produced it.
- *   - 64 bytes → Arcium MXE callback CPI (`classification_ct[32] || score_ct[32]`),
- *     the only production path.
+ *   - 64 or 80 bytes → Arcium MXE callback CPI. Prefer 80 bytes:
+ *     `classification_ct[32] || score_ct[32] || mpc_output_nonce_le[16]` (current).
+ *     Legacy 64-byte rows omit the output nonce and cannot be decrypted correctly in-browser.
  *   - any other non-empty length → finalized by an older off-chain script that
  *     pre-dated the MXE → main CPI; surfaced as "Legacy" so the demo is honest
  *     about historical records but never produced by current code.
  *   - empty → Pending or otherwise not finalized yet.
  */
 export function classifyRoute(outputDataBytes: number): VerificationRoute {
-  if (outputDataBytes === 64) return "MPC";
+  if (outputDataBytes === 64 || outputDataBytes === 80) return "MPC";
   if (outputDataBytes > 0) return "Legacy";
   return "Unknown";
 }

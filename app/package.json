@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "vite optimize --force",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
@@ -18,7 +19,7 @@
     "@solana/wallet-adapter-react-ui": "^0.9.35",
     "@solana/wallet-adapter-solflare": "^0.6.33",
     "@solana/wallet-adapter-wallets": "^0.19.38",
-    "@solana/web3.js": "^1.95.0",
+    "@solana/web3.js": "1.91.9",
     "bn.js": "^5.2.1",
     "buffer": "^6.0.3",
     "crypto-browserify": "^3.12.1",
@@ -26,6 +27,9 @@
     "react-dom": "^18.3.1",
     "stream-browserify": "^3.0.0",
     "vite-plugin-node-polyfills": "^0.26.0"
+  },
+  "overrides": {
+    "@solana/web3.js": "1.91.9"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.5",

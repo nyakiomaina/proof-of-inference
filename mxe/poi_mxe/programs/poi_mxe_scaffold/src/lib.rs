@@ -139,11 +139,15 @@ pub mod poi_mxe_scaffold {
             ErrorCode::WrongMxeSigner
         );
 
-        // The 64-byte payload the main program treats as `output_data`:
-        // `classification_ct[32] || score_ct[32]`. Decoded by the frontend.
-        let mut output_data = Vec::with_capacity(64);
+        // Payload for `proof_of_inference::callback_verified_inference.output_data`:
+        //   classification_ct[32] || score_ct[32] || mpc_output_nonce_le[16]
+        //
+        // Rescue-CTR decryption must use the MPC output nonce (`o.nonce`), not the
+        // request-side encryption nonce passed into `run_inference_v2`.
+        let mut output_data = Vec::with_capacity(80);
         output_data.extend_from_slice(&o.ciphertexts[0]);
         output_data.extend_from_slice(&o.ciphertexts[1]);
+        output_data.extend_from_slice(&o.nonce.to_le_bytes());
 
         let cluster = ctx.accounts.cluster_account.key();
         // Real attestation count from the Arcium Cluster account. Saturating

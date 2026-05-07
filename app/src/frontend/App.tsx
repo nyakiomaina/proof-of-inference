@@ -34,11 +34,14 @@ function Dashboard() {
       <header className="border-b border-gray-800/60 bg-gray-950 sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded bg-white flex items-center justify-center">
-              <svg className="w-3.5 h-3.5 text-gray-950" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-            </div>
+            <img
+              src="/logo.png"
+              alt=""
+              width={112}
+              height={74}
+              className="h-7 w-auto object-contain rounded-md ring-1 ring-gray-800/80"
+              decoding="async"
+            />
             <span className="text-sm font-semibold text-gray-100 tracking-tight">
               proof-of-inference
             </span>
@@ -49,6 +52,8 @@ function Dashboard() {
               <span>{models.length} models</span>
               <span className="text-gray-700">|</span>
               <span>{inferences.filter((i) => i.status === "Verified").length} verified</span>
+              <span className="text-gray-700">|</span>
+              <span>{inferences.filter((i) => i.status === "Failed").length} failed</span>
             </div>
             <WalletMultiButton />
           </div>
