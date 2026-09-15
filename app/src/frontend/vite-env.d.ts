@@ -6,6 +6,8 @@ interface ImportMetaEnv {
   readonly VITE_MXE_PROGRAM_ID?: string;
   readonly VITE_REQUESTER_TOKEN_ACCOUNT?: string;
   readonly VITE_PROTOCOL_FEE_VAULT?: string;
+  readonly VITE_TOKEN_MINT?: string;
+  readonly VITE_ARCIUM_CLUSTER_OFFSET?: string;
 }
 
 interface ImportMeta {

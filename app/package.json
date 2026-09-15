@@ -1,16 +1,16 @@
 {
-  "name": "proof-of-inference-demo",
+  "name": "proof-of-inference-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "vite optimize --force",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "@arcium-hq/client": "^0.9.7",
+    "@noble/hashes": "^1.8.0",
     "@coral-xyz/anchor": "^0.32.1",
     "@solana/spl-token": "^0.4.6",
     "@solana/wallet-adapter-base": "^0.9.23",

@@ -8,7 +8,9 @@
  *   3. Creates a devnet SPL token mint (stands in for USDC)
  *   4. Creates the protocol fee vault token account
  *   5. Creates a requester token account and mints test tokens
- *   6. Prints the env vars you need in app/.env
+ *   6. Initializes the singleton ProtocolConfig (pins the fee vault)
+ *
+ * Then prints / merges the env vars you need into app/.env.
  *
  * Usage:
  *   node scripts/devnet-setup.js [--wallet ~/.config/solana/id.json]
@@ -26,6 +28,7 @@ import {
   getOrCreateAssociatedTokenAccount,
   mintTo,
 } from "@solana/spl-token";
+import anchor from "@coral-xyz/anchor";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -51,7 +54,7 @@ async function main() {
   const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
 
   // 1. Airdrop SOL
-  console.log("\n[1/5] Airdropping 2 SOL...");
+  console.log("\n[1/6] Airdropping 2 SOL...");
   try {
     const sig = await connection.requestAirdrop(
       deployer.publicKey,
@@ -68,7 +71,7 @@ async function main() {
   console.log("  Balance:", balance / LAMPORTS_PER_SOL, "SOL");
 
   // 2. Check program deployment
-  console.log("\n[2/5] Checking program deployment...");
+  console.log("\n[2/6] Checking program deployment...");
   const idlPath = path.join(__dirname, "..", "target", "idl", "proof_of_inference.json");
   if (!fs.existsSync(idlPath)) {
     console.error("  ERROR: target/idl/proof_of_inference.json not found.");
@@ -97,7 +100,7 @@ async function main() {
   }
 
   // 3. Create devnet token mint (6 decimals, like USDC)
-  console.log("\n[3/5] Creating devnet token mint...");
+  console.log("\n[3/6] Creating devnet token mint...");
   const mint = await createMint(
     connection,
     deployer,
@@ -107,9 +110,27 @@ async function main() {
   );
   console.log("  Mint:", mint.toBase58());
 
-  // 4. Create protocol fee vault (owned by deployer — no extra airdrop needed)
-  console.log("\n[4/5] Creating protocol fee vault token account...");
-  const vaultOwner = Keypair.generate();
+  // 4. Create protocol fee vault. Its owner must differ from the requester
+  //    (otherwise the fee transfer is a self-transfer), and it must be persisted
+  //    — a generated-then-discarded owner keypair permanently locks every fee
+  //    the protocol ever collects.
+  console.log("\n[4/6] Creating protocol fee vault token account...");
+  const vaultOwnerPath = path.join(__dirname, "fee-vault-owner.json");
+  let vaultOwner;
+  if (fs.existsSync(vaultOwnerPath)) {
+    vaultOwner = Keypair.fromSecretKey(
+      Uint8Array.from(JSON.parse(fs.readFileSync(vaultOwnerPath, "utf8")))
+    );
+    console.log("  Reusing vault owner from", vaultOwnerPath);
+  } else {
+    vaultOwner = Keypair.generate();
+    fs.writeFileSync(
+      vaultOwnerPath,
+      JSON.stringify(Array.from(vaultOwner.secretKey))
+    );
+    console.log("  Vault owner keypair written to", vaultOwnerPath);
+  }
+  console.log("  Vault owner:", vaultOwner.publicKey.toBase58());
   const protocolFeeVault = await getOrCreateAssociatedTokenAccount(
     connection,
     deployer,   // payer (deployer pays rent)
@@ -119,7 +140,7 @@ async function main() {
   console.log("  Fee vault:", protocolFeeVault.address.toBase58());
 
   // 5. Create requester token account + mint test tokens
-  console.log("\n[5/5] Creating requester token account and minting test tokens...");
+  console.log("\n[5/6] Creating requester token account and minting test tokens...");
   const requesterAta = await getOrCreateAssociatedTokenAccount(
     connection,
     deployer,
@@ -139,6 +160,44 @@ async function main() {
   console.log("  Requester ATA:", requesterAta.address.toBase58());
   console.log("  Minted: 100 test tokens");
 
+  // 6. Initialize the singleton ProtocolConfig. `request_inference` constrains
+  //    the fee vault against this account, so nothing works until it exists.
+  console.log("\n[6/6] Initializing protocol config...");
+  const { PublicKey } = await import("@solana/web3.js");
+  const provider = new anchor.AnchorProvider(
+    connection,
+    new anchor.Wallet(deployer),
+    { commitment: "confirmed" }
+  );
+  const program = new anchor.Program(idl, provider);
+  const [configPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("config")],
+    new PublicKey(programId)
+  );
+  const existingConfig = await program.account.protocolConfig.fetchNullable(
+    configPda
+  );
+  if (existingConfig) {
+    console.log("  Config already initialized at", configPda.toBase58());
+    console.log("  Pinned fee vault:", existingConfig.feeVault.toBase58());
+    console.log(
+      "  NOTE: the vault above is the one the program will accept — the vault\n" +
+        "        created in step 4 is ignored unless you call update_protocol."
+    );
+  } else {
+    await program.methods
+      .initializeProtocol()
+      .accounts({
+        protocolConfig: configPda,
+        feeVault: protocolFeeVault.address,
+        authority: deployer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    console.log("  Config:", configPda.toBase58());
+    console.log("  Authority:", deployer.publicKey.toBase58());
+  }
+
   // Print env vars
   console.log("\n=== Add these to app/.env ===\n");
   const envLines = [
@@ -150,10 +209,23 @@ async function main() {
   ];
   envLines.forEach((l) => console.log(l));
 
-  // Write to app/.env
+  // Merge into app/.env rather than overwriting it — a plain write would drop
+  // VITE_MXE_PROGRAM_ID and any RPC override already configured there.
   const envPath = path.join(__dirname, "..", "app", ".env");
-  fs.writeFileSync(envPath, envLines.join("\n") + "\n");
-  console.log("\n  Written to", envPath);
+  const existing = fs.existsSync(envPath)
+    ? fs.readFileSync(envPath, "utf8").split("\n")
+    : [];
+  const managed = new Set(
+    envLines
+      .filter((l) => !l.startsWith("#"))
+      .map((l) => l.split("=")[0])
+  );
+  const preserved = existing.filter((line) => {
+    const key = line.split("=")[0];
+    return line.trim() !== "" && !managed.has(key);
+  });
+  fs.writeFileSync(envPath, [...preserved, ...envLines].join("\n") + "\n");
+  console.log("\n  Merged into", envPath);
 
   console.log("\n=== Setup Complete ===");
   console.log("Now run: cd app && npm run dev");

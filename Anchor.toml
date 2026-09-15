@@ -20,7 +20,10 @@ wallet = "~/.config/solana/id.json"
 members = ["programs/proof-of-inference", "programs/poi-consumer"]
 
 [scripts]
-test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+# NODE_OPTIONS: Node >= 22.18 strips types natively, so mocha's `import()` loads
+# the specs as ESM and they fail before any test runs. Disabling it makes the
+# import fail fast so mocha falls back to `require` + the ts-node/register hook.
+test = "NODE_OPTIONS=--no-experimental-strip-types npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
 
 [hooks]
 

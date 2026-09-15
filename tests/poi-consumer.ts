@@ -12,6 +12,7 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
+import { ensureProtocol } from "./protocolSetup";
 
 import poiIdl from "../target/idl/proof_of_inference.json";
 import consumerIdl from "../target/idl/poi_consumer.json";
@@ -52,43 +53,9 @@ describe("poi_consumer (gated_action via CPI)", () => {
   );
 
   it("register → request → callback → gated_action via CPI", async () => {
-    const mint = await createMint(
-      connection,
-      payer,
-      wallet.publicKey,
-      null,
-      6
-    );
-
-    const vaultOwner = Keypair.generate();
-    {
-      const sig = await connection.requestAirdrop(vaultOwner.publicKey, 2e9);
-      const latest = await connection.getLatestBlockhash();
-      await connection.confirmTransaction(
-        { signature: sig, ...latest },
-        "confirmed"
-      );
-    }
-
-    const requesterAta = await getOrCreateAssociatedTokenAccount(
-      connection,
-      payer,
-      mint,
-      wallet.publicKey
-    );
-    const protocolFeeVault = await getOrCreateAssociatedTokenAccount(
-      connection,
-      payer,
-      mint,
-      vaultOwner.publicKey
-    );
-    await mintTo(
-      connection,
-      payer,
-      mint,
-      requesterAta.address,
-      wallet.publicKey,
-      1_000_000
+    const { configPda, feeVault, requesterAta, mint } = await ensureProtocol(
+      program,
+      provider
     );
 
     const weightCommitment = Uint8Array.from(randomBytes(32));
@@ -132,8 +99,9 @@ describe("poi_consumer (gated_action via CPI)", () => {
         modelRegistry: modelPda,
         verifiedInference: inferencePda,
         requester: wallet.publicKey,
-        requesterToken: requesterAta.address,
-        protocolFeeVault: protocolFeeVault.address,
+        protocolConfig: configPda,
+        requesterToken: requesterAta,
+        protocolFeeVault: feeVault,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       } as any)
@@ -142,7 +110,12 @@ describe("poi_consumer (gated_action via CPI)", () => {
     const cluster = Keypair.generate().publicKey;
     const outputData = Buffer.from([7, 8, 9, 10]);
     await program.methods
-      .callbackVerifiedInference(outputData, cluster, 4)
+      .callbackVerifiedInference(
+        outputData,
+        cluster,
+        4,
+        Array.from(weightCommitment)
+      )
       .accounts({
         verifiedInference: inferencePda,
         modelRegistry: modelPda,

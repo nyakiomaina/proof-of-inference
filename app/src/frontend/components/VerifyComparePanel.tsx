@@ -143,11 +143,6 @@ export function VerifyComparePanel({ inferences }: Props) {
                   }`}
                 >
                   {verifiedResult.label}
-                  {verifiedResult.score !== null && (
-                    <span className="text-sm font-normal text-gray-500 ml-2">
-                      score {verifiedResult.score}
-                    </span>
-                  )}
                 </div>
                 {verifiedResult.sealedDetail ? (
                   <div className="text-[10px] font-mono text-gray-600 break-all bg-black/20 rounded px-2 py-1.5 max-h-28 overflow-y-auto">
@@ -233,11 +228,6 @@ export function VerifyComparePanel({ inferences }: Props) {
                             >
                               {r.label}
                             </span>
-                            {r.score !== null && (
-                              <span className="text-gray-600 ml-1.5">
-                                · score {r.score}
-                              </span>
-                            )}
                           </>
                         ) : (
                           <span className="text-gray-600 font-mono">

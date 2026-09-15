@@ -11,9 +11,10 @@ include!(concat!(
     "/arcium_callback_authority_pubkey.rs"
 ));
 
-/// Verification fee per inference request (in token smallest units).
-/// For USDC with 6 decimals: 50_000 = $0.05
-const VERIFICATION_FEE: u64 = 50_000;
+/// Default verification fee per inference request (in token smallest units),
+/// written into `ProtocolConfig` at initialization. For USDC with 6 decimals:
+/// 50_000 = $0.05. Change it afterwards with `set_protocol_fee`.
+const DEFAULT_VERIFICATION_FEE: u64 = 50_000;
 
 /// Maximum length for model name strings.
 const MAX_MODEL_NAME_LEN: usize = 64;
@@ -24,6 +25,52 @@ const MAX_OUTPUT_DATA_LEN: usize = 1024;
 #[program]
 pub mod proof_of_inference {
     use super::*;
+
+    /// Initializes the singleton protocol config. Must run once before any
+    /// inference can be requested: it pins *which* token account collects the
+    /// verification fee, so a requester cannot nominate their own.
+    pub fn initialize_protocol(ctx: Context<InitializeProtocol>) -> Result<()> {
+        let config = &mut ctx.accounts.protocol_config;
+        config.authority = ctx.accounts.authority.key();
+        config.fee_vault = ctx.accounts.fee_vault.key();
+        config.fee = DEFAULT_VERIFICATION_FEE;
+        config.bump = ctx.bumps.protocol_config;
+
+        emit!(ProtocolInitialized {
+            authority: config.authority,
+            fee_vault: config.fee_vault,
+            fee: config.fee,
+        });
+
+        Ok(())
+    }
+
+    /// Updates the verification fee and/or the fee vault. Authority only.
+    pub fn update_protocol(
+        ctx: Context<UpdateProtocol>,
+        fee: Option<u64>,
+        new_authority: Option<Pubkey>,
+    ) -> Result<()> {
+        let config = &mut ctx.accounts.protocol_config;
+
+        if let Some(fee) = fee {
+            config.fee = fee;
+        }
+        if let Some(fee_vault) = &ctx.accounts.new_fee_vault {
+            config.fee_vault = fee_vault.key();
+        }
+        if let Some(new_authority) = new_authority {
+            config.authority = new_authority;
+        }
+
+        emit!(ProtocolUpdated {
+            authority: config.authority,
+            fee_vault: config.fee_vault,
+            fee: config.fee,
+        });
+
+        Ok(())
+    }
 
     /// Registers a new AI model on-chain by committing the SHA-256 hash of its weights.
     /// The model owner also specifies which Arcium MXE configuration will host the model
@@ -108,7 +155,9 @@ pub mod proof_of_inference {
         let model = &ctx.accounts.model_registry;
         require!(model.active, ErrorCode::ModelInactive);
 
-        // Transfer verification fee
+        // Transfer the verification fee. The destination is constrained to
+        // `protocol_config.fee_vault` in the account context, so the requester
+        // cannot route it back to an account they control.
         let fee_transfer = Transfer {
             from: ctx.accounts.requester_token.to_account_info(),
             to: ctx.accounts.protocol_fee_vault.to_account_info(),
@@ -116,7 +165,7 @@ pub mod proof_of_inference {
         };
         token::transfer(
             CpiContext::new(ctx.accounts.token_program.key(), fee_transfer),
-            VERIFICATION_FEE,
+            ctx.accounts.protocol_config.fee,
         )?;
 
         let inference = &mut ctx.accounts.verified_inference;
@@ -153,6 +202,7 @@ pub mod proof_of_inference {
         output_data: Vec<u8>,
         cluster: Pubkey,
         node_count: u8,
+        weight_commitment: [u8; 32],
     ) -> Result<()> {
         require!(
             output_data.len() <= MAX_OUTPUT_DATA_LEN,
@@ -166,6 +216,17 @@ pub mod proof_of_inference {
             ErrorCode::InferenceNotPending
         );
 
+        // The MPC circuit recomputed this commitment from the weights it was
+        // actually handed and revealed it as a plaintext output. Requiring it to
+        // match the commitment snapshotted at request time is what makes the
+        // attestation mean "this model produced this output" rather than merely
+        // "some cluster evaluated something". Weights reach the circuit as
+        // caller-supplied ciphertexts, so this is the only thing binding them.
+        require!(
+            weight_commitment == inference.model_commitment,
+            ErrorCode::WeightCommitmentMismatch
+        );
+
         inference.output_data = output_data.clone();
         inference.output_hash = sha256_hash(&output_data).to_bytes();
         inference.arcium_cluster = cluster;
@@ -173,7 +234,10 @@ pub mod proof_of_inference {
         inference.status = VerificationStatus::Verified;
 
         let model = &mut ctx.accounts.model_registry;
-        model.total_inferences = model.total_inferences.checked_add(1).unwrap();
+        model.total_inferences = model
+            .total_inferences
+            .checked_add(1)
+            .ok_or(ErrorCode::InferenceCounterOverflow)?;
 
         emit!(InferenceVerified {
             model: model.key(),
@@ -228,6 +292,19 @@ pub mod proof_of_inference {
 // ---------------------------------------------------------------------------
 // Account Structures
 // ---------------------------------------------------------------------------
+
+#[account]
+#[derive(InitSpace)]
+pub struct ProtocolConfig {
+    /// Key allowed to change the fee and the vault.
+    pub authority: Pubkey,
+    /// The only token account `request_inference` will pay the fee into.
+    pub fee_vault: Pubkey,
+    /// Verification fee per inference, in the fee mint's smallest units.
+    pub fee: u64,
+    /// PDA bump seed.
+    pub bump: u8,
+}
 
 #[account]
 #[derive(InitSpace)]
@@ -324,6 +401,37 @@ pub struct VerificationResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Accounts)]
+pub struct InitializeProtocol<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + ProtocolConfig::INIT_SPACE,
+        seeds = [b"config"],
+        bump
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+    /// Token account that will receive verification fees.
+    pub fee_vault: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateProtocol<'info> {
+    #[account(
+        mut,
+        has_one = authority @ ErrorCode::UnauthorizedProtocolAuthority,
+        seeds = [b"config"],
+        bump = protocol_config.bump
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+    /// Optional replacement fee vault. Omit to leave the vault unchanged.
+    pub new_fee_vault: Option<Account<'info, TokenAccount>>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 #[instruction(weight_commitment: [u8; 32])]
 pub struct RegisterModel<'info> {
     #[account(
@@ -373,12 +481,19 @@ pub struct RequestInference<'info> {
     pub verified_inference: Account<'info, VerifiedInference>,
     #[account(mut)]
     pub requester: Signer<'info>,
+    #[account(seeds = [b"config"], bump = protocol_config.bump)]
+    pub protocol_config: Account<'info, ProtocolConfig>,
     #[account(
         mut,
         constraint = requester_token.owner == requester.key() @ ErrorCode::TokenOwnerMismatch
     )]
     pub requester_token: Account<'info, TokenAccount>,
-    #[account(mut)]
+    /// Pinned to the configured vault. Unconstrained, a requester could pass a
+    /// second account of their own and pay the "fee" to themselves.
+    #[account(
+        mut,
+        constraint = protocol_fee_vault.key() == protocol_config.fee_vault @ ErrorCode::WrongFeeVault
+    )]
     pub protocol_fee_vault: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -425,12 +540,19 @@ pub struct FailInference<'info> {
     pub arcium_authority: UncheckedAccount<'info>,
 }
 
-/// Returns true when `signer` matches one of the two compile-time callback
-/// authorities — the MXE program's signing PDA (production) or the test-only
-/// off-chain key (integration tests). See `build.rs` for source of truth.
+/// Returns true when `signer` is an accepted callback authority.
+///
+/// A release build accepts only `MXE_CALLBACK_AUTHORITY`, the Arcium MXE
+/// program's signing PDA. The off-chain test key is compiled in only under the
+/// `test-callback` cargo feature; see `build.rs` for why that must never be
+/// enabled for a deployed artifact.
 #[inline(always)]
 fn is_authorized_callback_signer(signer: &Pubkey) -> bool {
-    *signer == MXE_CALLBACK_AUTHORITY || *signer == ARCIUM_CALLBACK_AUTHORITY
+    #[cfg(feature = "test-callback")]
+    if *signer == ARCIUM_CALLBACK_AUTHORITY {
+        return true;
+    }
+    *signer == MXE_CALLBACK_AUTHORITY
 }
 
 #[derive(Accounts)]
@@ -441,6 +563,20 @@ pub struct CheckVerification<'info> {
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
+
+#[event]
+pub struct ProtocolInitialized {
+    pub authority: Pubkey,
+    pub fee_vault: Pubkey,
+    pub fee: u64,
+}
+
+#[event]
+pub struct ProtocolUpdated {
+    pub authority: Pubkey,
+    pub fee_vault: Pubkey,
+    pub fee: u64,
+}
 
 #[event]
 pub struct ModelRegistered {
@@ -508,4 +644,12 @@ pub enum ErrorCode {
     TokenOwnerMismatch,
     #[msg("Model registry does not match the inference record")]
     ModelMismatch,
+    #[msg("Fee vault does not match the one pinned in ProtocolConfig")]
+    WrongFeeVault,
+    #[msg("Only the protocol authority can update the protocol config")]
+    UnauthorizedProtocolAuthority,
+    #[msg("MPC-reported weight commitment does not match the registered model")]
+    WeightCommitmentMismatch,
+    #[msg("Model inference counter overflowed")]
+    InferenceCounterOverflow,
 }

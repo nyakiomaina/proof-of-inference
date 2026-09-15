@@ -15,6 +15,9 @@ no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
 idl-build = ["anchor-lang/idl-build", "proof-of-inference/idl-build"]
+# Pass-through so `anchor build -- --features test-callback` can be applied to
+# the whole workspace. See proof-of-inference/build.rs — never ship it.
+test-callback = ["proof-of-inference/test-callback"]
 
 [dependencies]
 anchor-lang = { workspace = true }

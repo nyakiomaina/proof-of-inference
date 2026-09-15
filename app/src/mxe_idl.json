@@ -60,11 +60,12 @@
       "docs": [
         "Queue a confidential inference computation on the Arcium MPC network.",
         "",
-        "`ciphertexts` must contain exactly 6 elements (each [u8; 32]):",
-        "[0..1] = model weights w0, w1 (u8)",
-        "[2]    = bias (u8)",
-        "[3]    = threshold (u8)",
-        "[4..5] = input features f0, f1 (u8)",
+        "`ciphertexts` must contain exactly 14 elements (each [u8; 32]):",
+        "[0..1]  = model weights w0, w1 (u8)",
+        "[2]     = bias (u8)",
+        "[3]     = threshold (u8)",
+        "[4..5]  = input features f0, f1 (u8)",
+        "[6..13] = 8-byte commitment salt, one byte per ciphertext",
         "",
         "`poi_program`, `poi_inference`, `poi_model_registry` are forwarded to the",
         "callback as extra accounts so the callback can CPI into",
@@ -377,15 +378,20 @@
     {
       "code": 6002,
       "name": "WrongCiphertextCount",
-      "msg": "Expected exactly 6 ciphertexts"
+      "msg": "Expected exactly 14 ciphertexts (6 inputs + 8 salt bytes)"
     },
     {
       "code": 6003,
+      "name": "WrongPoiProgram",
+      "msg": "poi_program is not the proof-of-inference program"
+    },
+    {
+      "code": 6004,
       "name": "MissingCallbackExtraAccounts",
       "msg": "Callback context is missing one of the proof-of-inference extra accounts"
     },
     {
-      "code": 6004,
+      "code": 6005,
       "name": "WrongMxeSigner",
       "msg": "Provided MXE signer PDA does not match this program's derived address"
     }
@@ -1110,6 +1116,22 @@
             "name": "field_0",
             "type": {
               "defined": {
+                "name": "RunInferenceV2OutputStruct0"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RunInferenceV2OutputStruct0",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "field_0",
+            "type": {
+              "defined": {
                 "name": "SharedEncryptedStruct",
                 "generics": [
                   {
@@ -1118,6 +1140,15 @@
                   }
                 ]
               }
+            }
+          },
+          {
+            "name": "field_1",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
             }
           }
         ]

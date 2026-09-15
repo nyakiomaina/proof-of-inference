@@ -1,16 +1,27 @@
 import React, { useState } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
-import { AnchorProvider, Program, Idl, BN } from "@coral-xyz/anchor";
+import {
+  TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import { Program, Idl, BN } from "@coral-xyz/anchor";
 import type {
   RegisteredModel,
   VerifiedInferenceRecord,
 } from "../hooks/useDemoState";
 import { ConnectWalletGate } from "./ConnectWalletGate";
-import { useProgram, findInferencePda } from "../hooks/useProgram";
+import {
+  useProgram,
+  findInferencePda,
+  findProtocolConfigPda,
+} from "../hooks/useProgram";
 import { createMxeRescueCipher, RescueCipher } from "../lib/arciumInference";
-import { DEFAULT_WEIGHTS, loadWeights } from "../lib/modelWeights";
+import {
+  commitmentForWeights,
+  loadWeights,
+  saltToBytes,
+} from "../lib/modelWeights";
 import { formatInferenceOutputForRecord } from "../lib/mpcOutputDecrypt";
 import { persistInferenceDecryptSecrets } from "../lib/inferenceDecryptStorage";
 import mxeIdlJson from "../../mxe_idl.json";
@@ -82,11 +93,14 @@ interface Props {
 
 // Arcium cluster offset — cluster-dependent (see mxe/poi_mxe/Arcium.toml:
 // devnet = 456, mainnet = 2026). Override with VITE_ARCIUM_CLUSTER_OFFSET.
-const ARCIUM_CLUSTER_OFFSET = (() => {
+// Resolved lazily, in `handleSubmit`, rather than at module scope: an
+// import-time `throw` happens before React mounts, so ErrorBoundary never sees
+// it and a typo'd env var renders a blank page instead of the error card.
+function resolveArciumClusterOffset(): number {
   const raw = import.meta.env.VITE_ARCIUM_CLUSTER_OFFSET;
   if (raw) {
     const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) {
+    if (!Number.isInteger(n) || n < 0) {
       throw new Error(
         `VITE_ARCIUM_CLUSTER_OFFSET must be a non-negative integer, got: ${raw}`
       );
@@ -96,7 +110,7 @@ const ARCIUM_CLUSTER_OFFSET = (() => {
   const cluster = (import.meta.env.VITE_SOLANA_CLUSTER ?? "devnet").toLowerCase();
   if (cluster === "mainnet-beta" || cluster === "mainnet") return 2026;
   return 456;
-})();
+}
 
 // MXE IDL is synced by scripts/sync-mxe-idl.cjs. A stub is written when
 // `arcium build` hasn't run yet. Detect that and degrade gracefully.
@@ -113,7 +127,7 @@ export function RunInferencePanel({
 }: Props) {
   const { publicKey, signTransaction } = useWallet();
   const { connection } = useConnection();
-  const { program } = useProgram();
+  const { program, provider } = useProgram();
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [inputText, setInputText] = useState("");
   const [currentInference, setCurrentInference] =
@@ -136,9 +150,10 @@ export function RunInferencePanel({
   const mxeProgramId = import.meta.env.VITE_MXE_PROGRAM_ID;
   const requesterTokenAddr = import.meta.env.VITE_REQUESTER_TOKEN_ACCOUNT;
   const feeVaultAddr = import.meta.env.VITE_PROTOCOL_FEE_VAULT;
+  const tokenMintAddr = import.meta.env.VITE_TOKEN_MINT;
 
   async function handleSubmit() {
-    if (!model || !publicKey || !program || !signTransaction) return;
+    if (!model || !publicKey || !program || !provider || !signTransaction) return;
     setLoading(true);
     setError(null);
     setCurrentInference(null);
@@ -160,12 +175,6 @@ export function RunInferencePanel({
       // Phase 1: Encrypt input via Arcium Rescue cipher (if MXE configured)
       setPhase("encrypting");
 
-      const provider = new AnchorProvider(
-        connection,
-        { publicKey, signTransaction, signAllTransactions: async (txs: any[]) => txs } as any,
-        AnchorProvider.defaultOptions()
-      );
-
       const textBytes = new TextEncoder().encode(inputText.trim());
       const hashBuf = await crypto.subtle.digest(
         "SHA-256",
@@ -173,17 +182,69 @@ export function RunInferencePanel({
       );
       const hashArr = new Uint8Array(hashBuf);
 
-      // Model weights (u8) — pulled from the same canonical tuple that produced
-      // `weight_commitment` at registration time. Falls back to defaults for
-      // models registered before the weight-binding flow existed.
-      const stored = loadWeights(model.pda) ?? DEFAULT_WEIGHTS;
+      // Model weights (u8) — the same canonical tuple that produced
+      // `weight_commitment` at registration time. The link is only meaningful if
+      // the weights we are about to feed the circuit actually hash to the
+      // commitment stored on chain, so re-derive and compare before queueing.
+      // Silently falling back to a default tuple would attest an inference to a
+      // model whose committed weights never entered the computation.
+      const stored = loadWeights(model.pda);
+      if (!stored) {
+        throw new Error(
+          `No local weights for model ${model.pda}. The weight tuple behind commitment ` +
+            `${model.weightCommitment} is held off-chain (localStorage) by whoever registered it — ` +
+            `re-register the model from this browser, or import its weights, before running an inference.`
+        );
+      }
+      const derived = toHex(commitmentForWeights(stored));
+      if (derived !== model.weightCommitment.toLowerCase()) {
+        throw new Error(
+          `Weight commitment mismatch for model ${model.pda}: local weights hash to ${derived} ` +
+            `but the on-chain registry commits to ${model.weightCommitment}. Refusing to run — ` +
+            `the attestation would reference a model that did not produce the output.`
+        );
+      }
       const w0 = BigInt(stored.w0);
       const w1 = BigInt(stored.w1);
       const bias = BigInt(stored.bias);
       const threshold = BigInt(stored.threshold);
-      const f0 = BigInt(hashArr[0]);
-      const f1 = BigInt(hashArr[1]);
-      const plaintext = [w0, w1, bias, threshold, f0, f1];
+
+      // Extract sentiment features from the actual input text.
+      // f0 encodes net sentiment as a u8 centered at 128:
+      //   f0 = clamp(128 + (posCount - negCount) * 20, 0, 255)
+      // With weights w0=1, w1=0, bias=0, threshold=127:
+      //   score = f0 → score > 127 means net sentiment >= 0 → Positive
+      // f1 is unused in this circuit configuration.
+      const POS_WORDS = new Set([
+        "good","great","excellent","amazing","love","happy","wonderful","fantastic",
+        "best","perfect","awesome","brilliant","outstanding","superb","enjoy","like",
+        "nice","beautiful","win","positive","glad","pleased","excited","impressive",
+        "incredible","remarkable","delightful","joy","hopeful","thankful","proud",
+      ]);
+      const NEG_WORDS = new Set([
+        "bad","terrible","awful","hate","horrible","worst","negative","poor",
+        "disappointing","fail","wrong","broken","ugly","nasty","dreadful","disgusting",
+        "annoying","boring","useless","stupid","angry","sad","frustrated","unpleasant",
+        "miserable","pathetic","dumb","trash","garbage","disaster","problem","painful",
+      ]);
+      const words = inputText.toLowerCase().match(/\b\w+\b/g) ?? [];
+      const posCount = words.filter((w) => POS_WORDS.has(w)).length;
+      const negCount = words.filter((w) => NEG_WORDS.has(w)).length;
+      const net = posCount - negCount;
+      const f0 = BigInt(Math.max(0, Math.min(255, 128 + net * 20)));
+      const f1 = 0n;
+      // Order must match `InferenceInput` in encrypted-ixs: the six scalars then
+      // the salt, one byte per ciphertext. The circuit hashes the salt together
+      // with the weights to re-derive the commitment.
+      const plaintext = [
+        w0,
+        w1,
+        bias,
+        threshold,
+        f0,
+        f1,
+        ...Array.from(saltToBytes(stored.salt), (b) => BigInt(b)),
+      ];
 
       // The Arcium MPC pipeline is the only path. If we can't encrypt or queue
       // a real MPC computation we fail here — submitting an inference that
@@ -274,9 +335,50 @@ export function RunInferencePanel({
       crypto.getRandomValues(inferenceNonce);
       const [inferencePda] = findInferencePda(modelPda, inferenceNonce);
 
-      if (!requesterTokenAddr || !feeVaultAddr) {
+      // The fee vault is pinned on chain by ProtocolConfig; read it from there
+      // rather than trusting env, so a stale app/.env surfaces as a clear error
+      // instead of an opaque `WrongFeeVault` constraint failure.
+      const [protocolConfigPda] = findProtocolConfigPda();
+      const protocolConfig = await (
+        program.account as any
+      ).protocolConfig.fetchNullable(protocolConfigPda);
+      if (!protocolConfig) {
         throw new Error(
-          "Set VITE_REQUESTER_TOKEN_ACCOUNT and VITE_PROTOCOL_FEE_VAULT in app/.env."
+          `Protocol is not initialized: no ProtocolConfig at ${protocolConfigPda.toBase58()}. ` +
+            `Run \`node scripts/devnet-setup.js\` (or call initialize_protocol) once per deployment.`
+        );
+      }
+      const feeVault: PublicKey = protocolConfig.feeVault;
+      if (feeVaultAddr && !feeVault.equals(new PublicKey(feeVaultAddr))) {
+        console.warn(
+          `VITE_PROTOCOL_FEE_VAULT (${feeVaultAddr}) is stale; on-chain config says ${feeVault.toBase58()}. Using the on-chain value.`
+        );
+      }
+
+      // `request_inference` requires `requester_token.owner == requester`, so the
+      // fee account must belong to the *connected* wallet. Derive its ATA for the
+      // fee mint; VITE_REQUESTER_TOKEN_ACCOUNT is only a fallback for setups
+      // without a mint configured (and only works for the wallet that owns it).
+      let requesterToken: PublicKey;
+      if (tokenMintAddr) {
+        requesterToken = getAssociatedTokenAddressSync(
+          new PublicKey(tokenMintAddr),
+          publicKey
+        );
+      } else if (requesterTokenAddr) {
+        requesterToken = new PublicKey(requesterTokenAddr);
+      } else {
+        throw new Error(
+          "Set VITE_TOKEN_MINT (preferred) or VITE_REQUESTER_TOKEN_ACCOUNT in app/.env."
+        );
+      }
+
+      const requesterTokenInfo = await connection.getAccountInfo(requesterToken);
+      if (!requesterTokenInfo) {
+        throw new Error(
+          `No fee token account for this wallet (${requesterToken.toBase58()}). ` +
+            `Create the associated token account for mint ${tokenMintAddr ?? "(unset)"} ` +
+            `and fund it with at least 0.05 tokens, then retry.`
         );
       }
 
@@ -288,8 +390,9 @@ export function RunInferencePanel({
             modelRegistry: modelPda,
             verifiedInference: inferencePda,
             requester: publicKey,
-            requesterToken: new PublicKey(requesterTokenAddr),
-            protocolFeeVault: new PublicKey(feeVaultAddr),
+            protocolConfig: protocolConfigPda,
+            requesterToken,
+            protocolFeeVault: feeVault,
             tokenProgram: TOKEN_PROGRAM_ID,
           } as any)
           .rpc();
@@ -320,6 +423,7 @@ export function RunInferencePanel({
       // Phase 2b — MXE scaffold run_inference_v2 → Arcium core queues MPC.
       // CPI callback later invokes proof_of_inference::callback_verified_inference.
       try {
+        const clusterOffset = resolveArciumClusterOffset();
         const mxeProgram = new Program(mxeIdlJson as unknown as Idl, provider);
         const offsetBytes = crypto.getRandomValues(new Uint8Array(8));
         const computationOffset = new BN(Array.from(offsetBytes), "le");
@@ -337,13 +441,13 @@ export function RunInferencePanel({
           .accountsPartial({
             payer: publicKey,
             computationAccount: getComputationAccAddress(
-              ARCIUM_CLUSTER_OFFSET,
+              clusterOffset,
               computationOffset
             ),
-            clusterAccount: getClusterAccAddress(ARCIUM_CLUSTER_OFFSET),
+            clusterAccount: getClusterAccAddress(clusterOffset),
             mxeAccount: getMXEAccAddress(mxePubkey),
-            mempoolAccount: getMempoolAccAddress(ARCIUM_CLUSTER_OFFSET),
-            executingPool: getExecutingPoolAccAddress(ARCIUM_CLUSTER_OFFSET),
+            mempoolAccount: getMempoolAccAddress(clusterOffset),
+            executingPool: getExecutingPoolAccAddress(clusterOffset),
             compDefAccount: getCompDefAccAddress(
               mxePubkey,
               Buffer.from(getCompDefAccOffset("run_inference_v2")).readUInt32LE()
@@ -542,11 +646,7 @@ function summarizeOutput(outputData: string): string {
   if (!outputData) return "";
   try {
     const parsed = JSON.parse(outputData);
-    if (parsed.label) {
-      return typeof parsed.score === "number"
-        ? `${parsed.label} (score ${parsed.score})`
-        : parsed.label;
-    }
+    if (parsed.label) return parsed.label;
     return outputData;
   } catch {
     return outputData;

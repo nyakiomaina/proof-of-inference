@@ -9,6 +9,17 @@ const COMP_DEF_OFFSET_RUN_INFERENCE: u32 = comp_def_offset("run_inference_v2");
 const CALLBACK_VERIFIED_INFERENCE_DISC: [u8; 8] =
     [199, 159, 139, 151, 193, 7, 242, 75];
 
+/// The only program this MXE will `invoke_signed` into from its callback.
+/// `poi_program` arrives as a caller-supplied argument, so without this check a
+/// caller could point the callback at an arbitrary program and have the MXE's
+/// `ArciumSignerAccount` PDA sign for it.
+const PROOF_OF_INFERENCE_ID: Pubkey =
+    Pubkey::from_str_const("5s7exNede5PNdwQYH6vguTGNV6K2iT5nQWo1SLrMGWgh");
+
+/// `w0, w1, bias, threshold, f0, f1` + an 8-byte commitment salt, one 32-byte
+/// ciphertext each. Keep in sync with `encrypted-ixs/src/lib.rs`.
+const EXPECTED_CIPHERTEXTS: usize = 14;
+
 declare_id!("EFZ1VFf9ws338N9YktYuVQXB8ascEhQ3agtRvVE2rzKF");
 
 #[arcium_program]
@@ -25,11 +36,12 @@ pub mod poi_mxe_scaffold {
 
     /// Queue a confidential inference computation on the Arcium MPC network.
     ///
-    /// `ciphertexts` must contain exactly 6 elements (each [u8; 32]):
-    ///   [0..1] = model weights w0, w1 (u8)
-    ///   [2]    = bias (u8)
-    ///   [3]    = threshold (u8)
-    ///   [4..5] = input features f0, f1 (u8)
+    /// `ciphertexts` must contain exactly 14 elements (each [u8; 32]):
+    ///   [0..1]  = model weights w0, w1 (u8)
+    ///   [2]     = bias (u8)
+    ///   [3]     = threshold (u8)
+    ///   [4..5]  = input features f0, f1 (u8)
+    ///   [6..13] = 8-byte commitment salt, one byte per ciphertext
     ///
     /// `poi_program`, `poi_inference`, `poi_model_registry` are forwarded to the
     /// callback as extra accounts so the callback can CPI into
@@ -45,7 +57,15 @@ pub mod poi_mxe_scaffold {
         poi_inference: Pubkey,
         poi_model_registry: Pubkey,
     ) -> Result<()> {
-        require!(ciphertexts.len() == 6, ErrorCode::WrongCiphertextCount);
+        require!(
+            ciphertexts.len() == EXPECTED_CIPHERTEXTS,
+            ErrorCode::WrongCiphertextCount
+        );
+        require_keys_eq!(
+            poi_program,
+            PROOF_OF_INFERENCE_ID,
+            ErrorCode::WrongPoiProgram
+        );
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
         let mut builder = ArgBuilder::new()
@@ -106,11 +126,18 @@ pub mod poi_mxe_scaffold {
         ctx: Context<RunInferenceV2Callback>,
         output: SignedComputationOutputs<RunInferenceV2Output>,
     ) -> Result<()> {
-        let o = match output.verify_output(
+        // `field_1` is the weight commitment the circuit recomputed from the
+        // weights it was actually given, revealed as plaintext. It is what makes
+        // the attestation binding: `proof_of_inference` refuses to finalize
+        // unless it equals the commitment recorded at model registration.
+        let (o, weight_commitment) = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
         ) {
-            Ok(RunInferenceV2Output { field_0 }) => field_0,
+            // The circuit returns a tuple, so the generated output struct wraps
+            // it in a single `field_0`: `.field_0` is the encrypted result,
+            // `.field_1` the revealed weight commitment.
+            Ok(RunInferenceV2Output { field_0 }) => (field_0.field_0, field_0.field_1),
             Err(_) => return Err(ErrorCode::AbortedComputation.into()),
         };
 
@@ -130,6 +157,14 @@ pub mod poi_mxe_scaffold {
         let poi_inference = &remaining[1];
         let poi_model_registry = &remaining[2];
         let mxe_signer = &remaining[3];
+
+        // Re-checked here, not just at queue time: the callback is what actually
+        // signs, so it must not trust the extra accounts it was handed.
+        require_keys_eq!(
+            poi_program.key(),
+            PROOF_OF_INFERENCE_ID,
+            ErrorCode::WrongPoiProgram
+        );
 
         let (expected_signer, signer_bump) =
             Pubkey::find_program_address(&[SIGN_PDA_SEED], &crate::ID);
@@ -161,13 +196,14 @@ pub mod poi_mxe_scaffold {
             .len()
             .clamp(1, u8::MAX as usize) as u8;
 
-        let mut data = Vec::with_capacity(8 + 4 + output_data.len() + 32 + 1);
+        let mut data = Vec::with_capacity(8 + 4 + output_data.len() + 32 + 1 + 32);
         data.extend_from_slice(&CALLBACK_VERIFIED_INFERENCE_DISC);
         // Borsh `Vec<u8>`: u32 LE length || bytes.
         data.extend_from_slice(&(output_data.len() as u32).to_le_bytes());
         data.extend_from_slice(&output_data);
         data.extend_from_slice(cluster.as_ref());
         data.push(node_count);
+        data.extend_from_slice(&weight_commitment);
 
         let cpi_ix = Instruction {
             program_id: poi_program.key(),
@@ -304,8 +340,10 @@ pub enum ErrorCode {
     AbortedComputation,
     #[msg("Cluster not set")]
     ClusterNotSet,
-    #[msg("Expected exactly 6 ciphertexts")]
+    #[msg("Expected exactly 14 ciphertexts (6 inputs + 8 salt bytes)")]
     WrongCiphertextCount,
+    #[msg("poi_program is not the proof-of-inference program")]
+    WrongPoiProgram,
     #[msg("Callback context is missing one of the proof-of-inference extra accounts")]
     MissingCallbackExtraAccounts,
     #[msg("Provided MXE signer PDA does not match this program's derived address")]

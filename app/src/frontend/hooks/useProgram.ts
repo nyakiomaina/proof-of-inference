@@ -37,6 +37,13 @@ export function useProgram() {
 }
 
 /**
+ * Derives the singleton ProtocolConfig PDA, which pins the fee vault and fee.
+ */
+export function findProtocolConfigPda(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("config")], PROGRAM_ID);
+}
+
+/**
  * Derives the ModelRegistry PDA.
  */
 export function findModelPda(

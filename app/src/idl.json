@@ -61,6 +61,15 @@
         {
           "name": "node_count",
           "type": "u8"
+        },
+        {
+          "name": "weight_commitment",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -126,6 +135,61 @@
           "type": "string"
         }
       ]
+    },
+    {
+      "name": "initialize_protocol",
+      "docs": [
+        "Initializes the singleton protocol config. Must run once before any",
+        "inference can be requested: it pins *which* token account collects the",
+        "verification fee, so a requester cannot nominate their own."
+      ],
+      "discriminator": [
+        188,
+        233,
+        252,
+        106,
+        134,
+        146,
+        202,
+        91
+      ],
+      "accounts": [
+        {
+          "name": "protocol_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_vault",
+          "docs": [
+            "Token account that will receive verification fees."
+          ]
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "register_model",
@@ -276,11 +340,33 @@
           "signer": true
         },
         {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "requester_token",
           "writable": true
         },
         {
           "name": "protocol_fee_vault",
+          "docs": [
+            "Pinned to the configured vault. Unconstrained, a requester could pass a",
+            "second account of their own and pay the \"fee\" to themselves."
+          ],
           "writable": true
         },
         {
@@ -357,6 +443,71 @@
           }
         }
       ]
+    },
+    {
+      "name": "update_protocol",
+      "docs": [
+        "Updates the verification fee and/or the fee vault. Authority only."
+      ],
+      "discriminator": [
+        206,
+        25,
+        218,
+        114,
+        109,
+        41,
+        74,
+        173
+      ],
+      "accounts": [
+        {
+          "name": "protocol_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_fee_vault",
+          "docs": [
+            "Optional replacement fee vault. Omit to leave the vault unchanged."
+          ],
+          "optional": true
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "protocol_config"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "fee",
+          "type": {
+            "option": "u64"
+          }
+        },
+        {
+          "name": "new_authority",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
     }
   ],
   "accounts": [
@@ -371,6 +522,19 @@
         165,
         246,
         200
+      ]
+    },
+    {
+      "name": "ProtocolConfig",
+      "discriminator": [
+        207,
+        91,
+        250,
+        28,
+        152,
+        179,
+        215,
+        209
       ]
     },
     {
@@ -452,6 +616,32 @@
         16,
         248
       ]
+    },
+    {
+      "name": "ProtocolInitialized",
+      "discriminator": [
+        173,
+        122,
+        168,
+        254,
+        9,
+        118,
+        76,
+        132
+      ]
+    },
+    {
+      "name": "ProtocolUpdated",
+      "discriminator": [
+        52,
+        35,
+        157,
+        26,
+        20,
+        117,
+        63,
+        218
+      ]
     }
   ],
   "errors": [
@@ -494,6 +684,26 @@
       "code": 6007,
       "name": "ModelMismatch",
       "msg": "Model registry does not match the inference record"
+    },
+    {
+      "code": 6008,
+      "name": "WrongFeeVault",
+      "msg": "Fee vault does not match the one pinned in ProtocolConfig"
+    },
+    {
+      "code": 6009,
+      "name": "UnauthorizedProtocolAuthority",
+      "msg": "Only the protocol authority can update the protocol config"
+    },
+    {
+      "code": 6010,
+      "name": "WeightCommitmentMismatch",
+      "msg": "MPC-reported weight commitment does not match the registered model"
+    },
+    {
+      "code": 6011,
+      "name": "InferenceCounterOverflow",
+      "msg": "Model inference counter overflowed"
     }
   ],
   "types": [
@@ -749,6 +959,82 @@
           {
             "name": "timestamp",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "Key allowed to change the fee and the vault."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_vault",
+            "docs": [
+              "The only token account `request_inference` will pay the fee into."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "fee",
+            "docs": [
+              "Verification fee per inference, in the fee mint's smallest units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolInitialized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
           }
         ]
       }

@@ -5,8 +5,9 @@ import type { RegisteredModel } from "../hooks/useDemoState";
 import { ConnectWalletGate } from "./ConnectWalletGate";
 import { useProgram, findModelPda } from "../hooks/useProgram";
 import {
-  DEFAULT_WEIGHTS,
   commitmentForWeights,
+  defaultWeights,
+  randomSalt,
   saveWeights,
   type ModelWeights,
 } from "../lib/modelWeights";
@@ -43,19 +44,15 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
   const [modelName, setModelName] = useState("");
   const [modelVersion, setModelVersion] = useState(1);
   const [modelType, setModelType] = useState<string>(MODEL_TYPES[0]);
-  const [weights, setWeights] = useState<ModelWeights>(DEFAULT_WEIGHTS);
+  const [weights, setWeights] = useState<ModelWeights>(defaultWeights);
   const [result, setResult] = useState<RegisteredModel | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const canSubmit = Boolean(publicKey) && Boolean(program) && modelName.trim().length > 0 && !loading;
 
-  function setWeight(key: keyof ModelWeights, raw: string) {
+  function setWeight(key: "w0" | "w1" | "bias" | "threshold", raw: string) {
     const n = Number.parseInt(raw, 10);
-    if (Number.isNaN(n)) {
-      setWeights((prev) => ({ ...prev, [key]: 0 }));
-      return;
-    }
-    const clamped = Math.max(0, Math.min(255, n));
+    const clamped = Number.isNaN(n) ? 0 : Math.max(0, Math.min(255, n));
     setWeights((prev) => ({ ...prev, [key]: clamped }));
   }
 
@@ -66,7 +63,7 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
     setError(null);
 
     try {
-      const commitment = await commitmentForWeights(weights);
+      const commitment = commitmentForWeights(weights);
 
       const [modelPda] = findModelPda(publicKey, commitment);
       const modelPdaStr = modelPda.toBase58();
@@ -214,8 +211,50 @@ export function RegisterModelPanel({ onRegister, loading, setLoading }: Props) {
             </div>
             <p className="text-[11px] text-gray-600 mt-2 leading-relaxed">
               Commitment is{" "}
-              <code className="font-mono">SHA-256("poi-weights-v1" || w0 || w1 || bias || threshold)</code>.
-              Anyone with the four weights can re-derive and verify the on-chain hash.
+              <code className="font-mono">
+                SHA3-256("poi-weights-v2" || w0 || w1 || bias || threshold || salt)
+              </code>
+              . The MPC circuit recomputes this from the weights it actually
+              receives and reveals it; the program rejects the attestation unless
+              it matches what is registered here.
+            </p>
+          </div>
+
+          <div>
+            <label className="label">
+              Commitment salt{" "}
+              <span className="text-gray-600 font-normal">
+                (8 bytes — keep it, you cannot run inference without it)
+              </span>
+            </label>
+            <div className="flex gap-2">
+              <input
+                className="input font-mono text-xs"
+                value={weights.salt}
+                onChange={(e) =>
+                  setWeights((prev) => ({
+                    ...prev,
+                    salt: e.target.value.trim().toLowerCase(),
+                  }))
+                }
+                spellCheck={false}
+                aria-label="commitment salt"
+              />
+              <button
+                type="button"
+                className="btn-outline shrink-0"
+                onClick={() =>
+                  setWeights((prev) => ({ ...prev, salt: randomSalt() }))
+                }
+              >
+                New
+              </button>
+            </div>
+            <p className="text-[11px] text-gray-600 mt-2 leading-relaxed">
+              Without a salt the four weights are one byte each, so the
+              commitment would be brute-forceable in 2<sup>32</sup>. Stored in
+              this browser alongside the weights — back it up to register the
+              same model elsewhere.
             </p>
           </div>
 

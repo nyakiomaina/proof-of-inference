@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import {
+  useAnchorWallet,
+  useConnection,
+  useWallet,
+} from "@solana/wallet-adapter-react";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 import type { VerifiedInferenceRecord } from "./useDemoState";
@@ -23,7 +27,8 @@ export function useDecryptedMpcOutputs(
   inferences: VerifiedInferenceRecord[]
 ): Record<string, string> {
   const { connection } = useConnection();
-  const { publicKey, signTransaction } = useWallet();
+  const { publicKey } = useWallet();
+  const anchorWallet = useAnchorWallet();
   const [map, setMap] = useState<Record<string, string>>({});
 
   const signature = useMemo(() => {
@@ -34,7 +39,7 @@ export function useDecryptedMpcOutputs(
   }, [inferences]);
 
   useEffect(() => {
-    if (!publicKey || !signTransaction) {
+    if (!publicKey || !anchorWallet) {
       setMap({});
       return;
     }
@@ -44,11 +49,7 @@ export function useDecryptedMpcOutputs(
     let cancelled = false;
     const provider = new AnchorProvider(
       connection,
-      {
-        publicKey,
-        signTransaction,
-        signAllTransactions: async (txs: any[]) => txs,
-      } as any,
+      anchorWallet,
       AnchorProvider.defaultOptions()
     );
 
@@ -83,7 +84,7 @@ export function useDecryptedMpcOutputs(
     return () => {
       cancelled = true;
     };
-  }, [connection, publicKey, signTransaction, signature]);
+  }, [connection, publicKey, anchorWallet, signature]);
 
   return map;
 }
