@@ -1,0 +1,15 @@
+# Without this, `COPY . .` ships the host's macOS-native node_modules into the
+# Alpine build stage, overwriting the `npm ci` install with binaries that can't
+# run there — and bloats the context with a stale dist/ and the git history.
+node_modules
+dist
+.git
+*.log
+tsconfig.tsbuildinfo
+Dockerfile
+.dockerignore
+
+# NOTE: .env is deliberately NOT ignored. Vite inlines VITE_* values at build
+# time, so they must be present when the builder stage runs `npm run build`.
+# Everything in it is public config (cluster, program ids, token accounts) —
+# never put a secret there.

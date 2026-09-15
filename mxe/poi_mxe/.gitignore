@@ -3,12 +3,15 @@
 # target/ — ignored, except for the program keypair (kept in source so
 # `anchor deploy` reproduces the same program ID across machines). DO NOT
 # reuse this keypair on mainnet; regenerate and use a multisig there.
-target
-!target/
-target/*
-!target/deploy/
-target/deploy/*
-!target/deploy/*-keypair.json
+# Leading slashes anchor these to the repo root. Unanchored `!target/`
+# re-includes every nested target/ (programs/*/target, mxe/*/target), which
+# leaves build artifacts showing up as untracked.
+target/
+!/target/
+/target/*
+!/target/deploy/
+/target/deploy/*
+!/target/deploy/*-keypair.json
 **/*.rs.bk
 node_modules
 test-ledger

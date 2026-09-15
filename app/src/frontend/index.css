@@ -3,11 +3,13 @@
 @tailwind utilities;
 
 @layer base {
-  body {
-    font-family: "Inter", system-ui, sans-serif;
-  }
-  code, .font-mono {
-    font-family: "JetBrains Mono", monospace;
+  /* Families live in tailwind.config.js so the `font-sans` / `font-mono`
+     utilities resolve to them; this only covers bare <code>/<pre>. */
+  code,
+  pre,
+  kbd,
+  samp {
+    font-family: theme("fontFamily.mono");
   }
 }
 
@@ -53,7 +55,13 @@
   }
 }
 
-/* Solana wallet adapter overrides */
+/* Solana wallet adapter overrides. Its stylesheet hardcodes a DM Sans stack,
+   which renders the only third-party chrome in a different face to the rest of
+   the app; pull it back onto the app's font. */
+[class^="wallet-adapter"],
+[class*=" wallet-adapter"] {
+  font-family: theme("fontFamily.sans") !important;
+}
 .wallet-adapter-button {
   background-color: #fff !important;
   color: #000 !important;
